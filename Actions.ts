@@ -255,10 +255,6 @@ export const openClaimSuccessModal = () => ({
   type: OPEN_CLAIM_SUCCESS_MODAL
 });
 
-export const closeClaimSuccessModal = () => ({
-  type: CLOSE_CLAIM_SUCCESS_MODAL
-});
-
 /* LOADINGS */
 export const setBuyNftLoading = (nftId: string, loading: boolean) => ({
   type: SET_BUY_NFT_LOADING,
