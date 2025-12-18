@@ -59,8 +59,7 @@ export interface editTagPayload {
   type: string;
 }
 
-export interface unlinkTagPayload {
-  type: string;
+export interface unlinkTagPayloa
   itemId: string | number;
   tagKey: string;
   pagination?: { page: number; perPage: number };
