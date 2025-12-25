@@ -1,29 +1,56 @@
+/* eslint-disable no-shadow */
+/* eslint-disable no-useless-catch */
+/* eslint-disable max-lines-per-function */
+/* eslint-disable complexity */
+/* eslint-disable no-magic-numbers */
+/* eslint-disable no-console */
+/* eslint-disable no-else-return */
+/* eslint-disable max-lines */
+/* eslint-disable no-await-in-loop */
+/* eslint-disable prefer-const */
+
 const mongoose = require('mongoose');
 const { config } = require('dotenv');
 const { ethers } = require('ethers');
 const { resolve } = require('path');
 const nodeCron = require('node-cron');
-const emailService = require('../helpers/email');
+const { getDecryptedPrivateKey } = require('../helpers/encryptionHooks');
 const { RewardIteration } = require('../models/RewardIteration');
 const {
   ERRORS,
   EVENTS,
   CREDIT_ACTIONS,
   GENERATION_TYPES,
+  HTTP_STATUS,
   MODALS,
   NFT_EVENTS,
   COMMON,
-  CHANNELS
+  CHANNELS,
+  TYPES,
+  PAY_STATUS,
 } = require('../consts/index');
-const { queueDb, SEND_CLAIM_YOUR_REWARD_EMAIL } = require('../helpers/queueDb');
+const {
+  QUEUE_NFT_EMAILS,
+  queueDb,
+  SEND_CLAIM_YOUR_REWARD_EMAIL,
+  QUEUE_REWARD_DISTRIBUTE,
+} = require('../helpers/queueDb');
 const pusher = require('../pusherConfig');
 const { NFT } = require('../models/NFT');
 const { NftActivity } = require('../models/nftActivity');
 const {
   subtractCredits,
-  triggerCreditsPusher
+  isCompanyEmployeeOrOwner,
 } = require('../helpers/credits');
 const { ObjectId } = require('mongodb');
+const { completeCampaign } = require('../helpers/rewardDistribution');
+const {
+  ideaCoinContract,
+  maticContract,
+  provider,
+  wallet,
+  updateUser,
+} = require('../helpers/blockchain');
 
 // Load environment variables
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -32,27 +59,9 @@ config({ path: envPath });
 
 // Initialize Ethereum provider, wallet, and contract
 const {
-  INFURA_URL: providerUrl,
-  PRIVATE_KEY: privateKey,
-  IDEACOIN_CONTRACT_ADDRESS: IdeaContractAddress,
-  MATIC_CONTRACT_ADDRESS: maticContractAddress,
   MARKETPLACE_CONTRACT_ADDRESS: marketplaceContractAddress,
   NFT_CONTRACT_ADDRESS: nftContractAddress,
-  CURRENCY,
-  COINBASE_API_URL,
 } = process.env;
-const provider = new ethers.providers.JsonRpcProvider(providerUrl);
-const wallet = new ethers.Wallet(privateKey, provider);
-const ideaCoinContract = new ethers.Contract(
-  IdeaContractAddress,
-  require('../contract/IdeaCoins.json'),
-  wallet,
-);
-const maticContract = new ethers.Contract(
-  maticContractAddress,
-  require('../contract/MaticToken.json'),
-  provider,
-);
 
 async function _getEligibleAddresses() {
   const users = await mongoose.model(MODALS.PROFILE).find({
@@ -69,7 +78,7 @@ async function _getEligibleAddresses() {
     try {
       user = user.toObject();
       const ideaCoins = await ideaCoinContract.balanceOf(user.walletAddress);
-      if (ideaCoins > 0) {
+      if (ideaCoins.gt(0)) {
         eligibleUsers.push({
           ...user,
           ideaCoins,
@@ -80,24 +89,6 @@ async function _getEligibleAddresses() {
     }
   }
   return eligibleUsers;
-}
-
-async function updateUser(id, updateObj) {
-  const query = { _id: id };
-  try {
-    const result = await mongoose
-      .model(MODALS.PROFILE)
-      .findOneAndUpdate(query, updateObj, { new: true });
-
-    if (!result) {
-      console.error(`Document with id ${id} not found`);
-      return null;
-    }
-    return result;
-  } catch (error) {
-    console.error(`Error updating document with id ${id}:`, error);
-    throw error;
-  }
 }
 
 async function insertRewardIteration(threshold) {
@@ -120,70 +111,62 @@ async function getLatestRewardIteration() {
   }
 }
 
-const fetchLivePrices = async () => {
-  const url = COINBASE_API_URL;
-  const currencies = ['USD', 'BTC', 'ETH'];
-
-  try {
-    const response = await fetch(`${url}?currency=${CURRENCY}`);
-    const data = await response.json();
-    const rates = data.data.rates;
-
-    const results = {};
-    currencies.forEach((currency) => {
-      if (rates[currency]) {
-        results[currency] = parseFloat(parseFloat(rates[currency]).toFixed(8));
-      }
-    });
-
-    return results;
-  } catch (error) {
-    console.error(ERRORS.FETCHING_LIVE_PRICES, error.message);
-  }
-};
-
 const formatBalance = (balance) => {
   return parseFloat(ethers.utils.formatUnits(balance, 18));
 };
 
-const convertMaticToCurrency = async (maticAmount) => {
-  try {
-    const prices = await fetchLivePrices();
-    return {
-      usd: maticAmount * prices.USD,
-      btc: maticAmount * prices.BTC,
-      eth: maticAmount * prices.ETH,
-    };
-  } catch (error) {
-    console.error(ERRORS.FAILED_TO_CONVERT_MATIC, error);
-  }
-};
-
-async function sendClaimYourRewardEmail(user, share) {
-  try {
-    const currencies = await convertMaticToCurrency(share);
-    await emailService.sendClaimYourRewardEmail({
-      email: user.email,
-      recipientFirstName: user.firstName | user.username,
-      user: user.firstName || user.username || user.email,
-      userLinkUrl: `${process.env.CLIENT_HOST}/${COMMON.PROFILES}/${user.key}`,
-      rewardAmount: share,
-      amountUSD: currencies.usd,
-      amountBTC: currencies.btc,
-      amountETH: currencies.eth,
-      mainImage: user?.files[0]?.url,
-    });
-  } catch (error) {
-    console.log(ERRORS.MAIL_SENDING_ERROR, error.message);
-  }
-}
-
 async function sendEmailViaQueue(user, share) {
   queueDb.addToQueue(SEND_CLAIM_YOUR_REWARD_EMAIL, { user, share });
-  queueDb.createWorker(SEND_CLAIM_YOUR_REWARD_EMAIL, async (item) => {
-    const { user, share } = item.data;
-    await sendClaimYourRewardEmail(user, share);
+  // queueDb.createWorker(SEND_CLAIM_YOUR_REWARD_EMAIL, async (item) => {
+  //   const { user, share } = item.data;
+  //   await sendClaimYourRewardEmail(user, share);
+  // });
+}
+
+async function getPrivateKeyForWalletAddress(userId, targetWalletAddress) {
+  const Tag = mongoose.model(MODALS.TAG);
+  const company = await Tag.findOne({
+    $or: [{ owner: userId }, { employees: { $in: [userId] } }],
   });
+
+  // Check if wallet belongs to company
+  if (
+    company?.walletAddress?.toLowerCase() === targetWalletAddress.toLowerCase()
+  ) {
+    return getDecryptedPrivateKey(company);
+  }
+
+  // Check if wallet belongs to user
+  const userProfile = await mongoose.model(MODALS.PROFILE).findById(userId);
+  if (
+    userProfile?.walletAddress?.toLowerCase() ===
+    targetWalletAddress.toLowerCase()
+  ) {
+    return getDecryptedPrivateKey(userProfile);
+  }
+
+  throw new Error('Wallet address does not match user or company wallet');
+}
+
+async function getPrivateKeyForListingOwner(userId, listingOwnerAddress) {
+  return getPrivateKeyForWalletAddress(userId, listingOwnerAddress);
+}
+
+// Helper function to check NFT expiry time from contract
+async function checkNftExpiryFromContract(tokenId) {
+  try {
+    const ideaNftContract = new ethers.Contract(
+      nftContractAddress,
+      require('../contract/IdeaNft.json'),
+      provider,
+    );
+    const expiryTime = await ideaNftContract.getNFTExpireTime(tokenId);
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    return Number(expiryTime.toString()) <= currentTimestamp;
+  } catch (error) {
+    console.error('Error checking NFT expiry:', error);
+    return false; // Return false on error to allow transaction (fail-safe)
+  }
 }
 
 // Blockchain controller object
@@ -225,7 +208,7 @@ const blockchainController = {
         (event) => event.event === EVENTS.REWARD_DISTRIBUTED,
       );
       const adjustedAmountEth = ethers.utils.formatEther(
-        rewardEvent.args.recipient,
+        rewardEvent.args.amount,
       );
 
       return {
@@ -275,7 +258,7 @@ const blockchainController = {
 
       const ownerMaticBalance = await maticContract.balanceOf(wallet.address);
       if (maticAmount.gte(ownerMaticBalance)) {
-        throw new Error(ERRORS.MATIC_INSUFFICIENT);
+        throw new Error(ERRORS.ETH_INSUFFICIENT);
       }
 
       pusher.trigger(
@@ -367,6 +350,11 @@ const blockchainController = {
           await updateUser(obj.id, {
             $inc: { share: obj.userShare.toFixed(12) },
           });
+          await mongoose.model(MODALS.REWARD_DISTRIBUTION_HISTORY).create({
+            user: obj.id,
+            share: obj.userShare.toFixed(12),
+            status: PAY_STATUS.PENDING,
+          });
         });
 
         const maticThreshold = (threshold * 125) / 100;
@@ -381,64 +369,43 @@ const blockchainController = {
     }
   },
 
-  async deployNftTransaction(req, res) {
-    try {
-      const { tokenURI } = req.body;
-      if (!tokenURI) {
-        return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
-      }
-
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
-
-      const ideaNftContract = new ethers.Contract(
-        nftContractAddress,
-        require('../contract/IdeaNft.json'),
-        signer,
-      );
-
-      const deployNftTxn = await ideaNftContract.mintNFT(tokenURI);
-      const receipt = await deployNftTxn.wait();
-
-      const event = receipt.events[0];
-
-      const value = event.args[2];
-      const tokenId = value.toNumber();
-
-      const { transactionHash, from, to } = receipt;
-
-      return res.json({
-        success: true,
-        message: COMMON.NFT_DEPLOY_SUCCESS,
-        transactionHash,
-        tokenId,
-        from,
-        to,
-      });
-    } catch (e) {
-      return res.status(500).json({
-        success: false,
-        message: `${ERRORS.DEPLOY_NFT_TRANSACTION_FAILED}: ${e.message}`,
-      });
-    }
-  },
-
   nftApprovalTransaction: async (req, res) => {
     try {
-      const { tokenId } = req.body;
+      const { tokenId, walletAddress } = req.body;
       if (!tokenId) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      if (!walletAddress) {
+        return res.status(400).json({ error: 'Wallet address is required' });
+      }
+
+      // Check NFT expiry time from contract before approval (if listing for auction)
+      const nft = await NFT.findOne({ tokenId });
+      if (nft?.onAuction) {
+        const isExpired = await checkNftExpiryFromContract(tokenId);
+        if (isExpired) {
+          return res.status(400).json({
+            success: false,
+            error: 'NFT has expired. Cannot approve for listing.',
+          });
+        }
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaNftContract = new ethers.Contract(
-        nftContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        process.env.NFT_CONTRACT_ADDRESS,
+        require('../contract/IdeaNft.json'),
         signer,
       );
 
       const tx = await ideaNftContract.approve(
-        marketplaceContractAddress,
+        process.env.MARKETPLACE_CONTRACT_ADDRESS,
         tokenId,
       );
       await tx.wait();
@@ -457,29 +424,10 @@ const blockchainController = {
 
   listFixedNftTransaction: async (req, res) => {
     try {
-      const { tokenId, listPrice, usdPrice } = req.body;
-      if (!tokenId || !listPrice || !usdPrice) {
+      const { tokenId, listPrice, usdPrice, walletAddress } = req.body;
+      if (!tokenId || !listPrice || !usdPrice || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
-
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
-
-      const ideaMarketplaceContract = new ethers.Contract(
-        marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
-        signer,
-      );
-
-      const listFixedNftTxn =
-        await ideaMarketplaceContract.listNftForFixedPrice(
-          tokenId,
-          listPrice,
-          nftContractAddress,
-        );
-
-      const receipt = await listFixedNftTxn.wait();
-
-      const { transactionHash, from, to } = receipt;
 
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
@@ -488,16 +436,62 @@ const blockchainController = {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
+      // Check NFT expiry time from contract before listing (if on auction)
+      if (nft?.onAuction) {
+        const isExpired = await checkNftExpiryFromContract(tokenId);
+        if (isExpired) {
+          return res.status(400).json({
+            success: false,
+            error: 'NFT has expired. Cannot list for fixed price.',
+          });
+        }
+
+        // Check if auction end time has passed
+        if (nft?.expiryDate) {
+          const currentTime = new Date();
+          const auctionEndTime = new Date(nft.expiryDate);
+          if (auctionEndTime <= currentTime) {
+            return res.status(400).json({
+              success: false,
+              error: 'Auction end time has been reached. Cannot list for fixed price.',
+            });
+          }
+        }
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        signer,
+      );
+
       const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
 
       const updatedData = {
         isListed: true,
         maticPrice: priceInMatic,
         usdPrice: usdPrice,
-        event: NFT_EVENTS.LIST
+        event: NFT_EVENTS.LIST,
       };
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+      const listFixedNftTxn =
+        await ideaMarketplaceContract.listNftForFixedPrice(
+          tokenId,
+          listPrice,
+          nftContractAddress,
+        );
+
+      const receipt = await listFixedNftTxn.wait(2);
+
+      const { transactionHash, from, to } = receipt;
 
       // ********************** nftActivity Table update *******************
       const activityData = {
@@ -514,22 +508,28 @@ const blockchainController = {
       // ********************** Subtract Credits *******************
       const creditsHistory = {
         _id: new ObjectId(),
-        action: CREDIT_ACTIONS.LIST_NFT
+        action: CREDIT_ACTIONS.LIST_NFT,
       };
+
+      const isOwnerOrEmployee = await isCompanyEmployeeOrOwner(
+        req?.user?.id,
+        nft,
+      );
 
       await subtractCredits(
         req.user.id,
         10,
         creditsHistory,
         null,
-        GENERATION_TYPES.NFT_TRANSACTION
+        GENERATION_TYPES.NFT_TRANSACTION,
+        false,
+        isOwnerOrEmployee,
       );
-
-      await triggerCreditsPusher(creditsHistory._id, req.user.id);
 
       return res.json({
         success: true,
-        message: COMMON.NFT_FIXED_LIST_SUCCESS
+        message: COMMON.NFT_FIXED_LIST_SUCCESS,
+        transactionHash: transactionHash,
       });
     } catch (e) {
       return res.status(500).json({
@@ -545,21 +545,6 @@ const blockchainController = {
       if (!tokenId || !priceOfNft) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
-
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
-
-      const ideaMarketplaceContract = new ethers.Contract(
-        marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
-        signer,
-      );
-
-      const cancelFixedNftTxn =
-        await ideaMarketplaceContract.cancelListingForFixedPrice(tokenId);
-
-      const receipt = await cancelFixedNftTxn.wait();
-
-      const { transactionHash, from, to } = receipt;
 
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
@@ -580,6 +565,35 @@ const blockchainController = {
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
+      // Get listing owner from the contract (not on-chain NFT owner, as NFT is in marketplace)
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        provider,
+      );
+      const fixedPriceData =
+        await ideaMarketplaceContractRead.fixedPrice(tokenId);
+      const listingOwnerAddress = fixedPriceData.owner.toLowerCase();
+
+      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+        req.user.id,
+        listingOwnerAddress,
+      );
+      const signer = new ethers.Wallet(ownerPrivateKey, provider);
+
+      const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        signer,
+      );
+
+      const cancelFixedNftTxn =
+        await ideaMarketplaceContract.cancelListingForFixedPrice(tokenId);
+
+      const receipt = await cancelFixedNftTxn.wait();
+
+      const { transactionHash, from, to } = receipt;
+
       // ********************** nftActivity Table update *******************
       const priceInMatic = ethers.utils.formatUnits(priceOfNft, 18);
       const activityData = {
@@ -591,9 +605,7 @@ const blockchainController = {
         txHash: transactionHash,
       };
 
-      const newNftActivity = await NftActivity.create(activityData);
-
-      console.log('Updated NFT Activity:', newNftActivity);
+      await NftActivity.create(activityData);
 
       return res.json({
         success: true,
@@ -613,22 +625,28 @@ const blockchainController = {
       if (!tokenId || !priceOfNft) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
+      let signer = null;
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const company = await mongoose.model(MODALS.TAG).findOne({
+        $or: [
+          { owner: req?.user?.id },
+          { employees: { $in: [req?.user?.id] } },
+        ],
+      });
+
+      if (company?.id ?? company?._id) {
+        const companyPrivateKey = getDecryptedPrivateKey(company);
+        signer = new ethers.Wallet(companyPrivateKey, provider);
+      } else {
+        const privateKey = getDecryptedPrivateKey(req.user);
+        signer = new ethers.Wallet(privateKey, provider);
+      }
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
         require('../contract/IdeaMarketplace.json'),
         signer,
       );
-
-      const buyTx = await ideaMarketplaceContract.buyFixedPriceNft(tokenId, {
-        value: priceOfNft,
-      });
-
-      const receipt = await buyTx.wait();
-
-      const { transactionHash, from, to } = receipt;
 
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
@@ -647,6 +665,25 @@ const blockchainController = {
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
+      const buyTx = await ideaMarketplaceContract.buyFixedPriceNft(tokenId, {
+        value: priceOfNft,
+      });
+
+      const receipt = await buyTx.wait();
+
+      const { transactionHash, from, to } = receipt;
+
+      // ************************ Application Table update **************************
+      if (nft.invention) {
+        await mongoose
+          .model(MODALS.APPLICATION)
+          .findOneAndUpdate(
+            { _id: nft.invention },
+            { owner: req.user.id },
+            { upsert: false },
+          );
+      }
+
       // ********************** nftActivity Table update *******************
       const priceInMatic = ethers.utils.formatUnits(priceOfNft, 18);
       const activityData = {
@@ -658,9 +695,32 @@ const blockchainController = {
         txHash: transactionHash,
       };
 
-      const newNftActivity = await NftActivity.create(activityData);
+      await NftActivity.create(activityData);
+      if (company?.id ?? company?._id) {
+        await blockchainController.distributeIdeaRewards(
+          company?.walletAddress,
+          2,
+        );
+      } else {
+        await blockchainController.distributeIdeaRewards(
+          req.user.walletAddress,
+          2,
+        );
+      }
 
-      console.log('Updated NFT Activity:', newNftActivity);
+      const reward = 2 * 0.1;
+
+      // Always attempt campaign reward distribution
+      const walletAddress = await completeCampaign(
+        req.user.id,
+        nft._id,
+        TYPES.NFT,
+        COMMON.PURCHASED_NFT,
+      );
+
+      if (walletAddress) {
+        await blockchainController.distributeIdeaRewards(walletAddress, reward);
+      }
 
       return res.json({
         success: true,
@@ -676,19 +736,85 @@ const blockchainController = {
 
   listAuctionNftTransaction: async (req, res) => {
     try {
-      const { listPrice, auctionStartTime, auctionEndTime, tokenId } = req.body;
+      const {
+        listPrice,
+        auctionStartTime,
+        auctionEndTime,
+        tokenId,
+        usdPrice,
+        walletAddress,
+      } = req.body;
 
-      if (!tokenId || !listPrice || !auctionStartTime || !auctionEndTime) {
+      if (
+        !tokenId ||
+        !listPrice ||
+        !auctionStartTime ||
+        !auctionEndTime ||
+        !usdPrice ||
+        !walletAddress
+      ) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      // Validate auction start and end times
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const startTime = Number(auctionStartTime);
+      const endTime = Number(auctionEndTime);
+
+      if (startTime < currentTimestamp || endTime <= currentTimestamp) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction start and end time must be greater than current time',
+        });
+      }
+
+      if (startTime >= endTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction start time must be less than end time',
+        });
+      }
+
+      // ********************** NFT Table Update *******************
+      const nft = await NFT.findOne({ tokenId });
+
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      // Check NFT expiry time from contract before listing for auction
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot list for auction.',
+        });
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
         require('../contract/IdeaMarketplace.json'),
         signer,
       );
+
+      const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
+      const updatedData = {
+        isListed: true,
+        maticPrice: priceInMatic,
+        usdPrice: usdPrice,
+        onAuction: true,
+        expiryDate: new Date(auctionEndTime * 1000),
+        auctionStartTime: new Date(auctionStartTime * 1000),
+        event: NFT_EVENTS.LIST,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       const listAuctionNftTxn =
         await ideaMarketplaceContract.listItemForAuction(
@@ -699,16 +825,47 @@ const blockchainController = {
           nftContractAddress,
         );
 
-      const receipt = await listAuctionNftTxn.wait();
+      const receipt = await listAuctionNftTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      // ********************** nftActivity Table update *******************
+      const activityData = {
+        nft: nft._id,
+        from: from,
+        to: to,
+        event: NFT_EVENTS.LIST,
+        price: priceInMatic,
+        txHash: transactionHash,
+      };
+
+      await NftActivity.create(activityData);
+
+      // ********************** Subtract Credits *******************
+      const creditsHistory = {
+        _id: new ObjectId(),
+        action: CREDIT_ACTIONS.LIST_NFT,
+      };
+
+      const isOwnerOrEmployee = await isCompanyEmployeeOrOwner(
+        req?.user?.id,
+        nft,
+      );
+
+      await subtractCredits(
+        req.user.id,
+        10,
+        creditsHistory,
+        null,
+        GENERATION_TYPES.NFT_TRANSACTION,
+        false,
+        isOwnerOrEmployee,
+      );
 
       return res.json({
         success: true,
         message: COMMON.NFT_AUCTION_LIST_SUCCESS,
-        transactionHash,
-        from,
-        to,
+        transactionHash: transactionHash,
       });
     } catch (e) {
       return res.status(500).json({
@@ -720,24 +877,82 @@ const blockchainController = {
 
   async cancelAuctionTransaction(req, res) {
     try {
-      const { tokenId } = req.body;
+      const { tokenId, priceOfNft } = req.body;
+      let priceForActivity = null;
+      if (priceOfNft && priceOfNft !== 0) {
+        priceForActivity = ethers.utils.formatUnits(priceOfNft, 18);
+      }
+
       if (!tokenId) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      // ********************** NFT Table Update *******************
+      const nft = await NFT.findOne({ tokenId });
 
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      const updatedData = {
+        isListed: false,
+        maticPrice: null,
+        usdPrice: null,
+        onAuction: false,
+        expiryDate: null,
+        auctionStartTime: null,
+        event: NFT_EVENTS.CANCEL,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+      // ********************** BID Table update **************************
+      const bidCount = await mongoose
+        .model(MODALS.BID)
+        .countDocuments({ tokenId: nft._id });
+      if (bidCount >= 1) {
+        await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
+      }
+
+      // Get listing owner from the contract (not on-chain NFT owner, as NFT is in marketplace)
       const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        provider,
+      );
+
+      const auctionData = await ideaMarketplaceContract.auction(tokenId);
+      const auctionOwnerAddress = auctionData.nftOwner.toLowerCase();
+
+      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+        req.user.id,
+        auctionOwnerAddress,
+      );
+
+      const signer = new ethers.Wallet(ownerPrivateKey, provider);
+      const contractWithSigner = new ethers.Contract(
         marketplaceContractAddress,
         require('../contract/IdeaMarketplace.json'),
         signer,
       );
 
       const cancelAuctionNftTxn =
-        await ideaMarketplaceContract.cancelListingForAuction(tokenId);
+        await contractWithSigner.cancelListingForAuction(tokenId);
 
       const receipt = await cancelAuctionNftTxn.wait();
       const { transactionHash, from, to } = receipt;
+
+      // ********************** nftActivity Table update *******************
+      const activityData = {
+        nft: nft._id,
+        from: from,
+        to: to,
+        event: NFT_EVENTS.CANCEL,
+        price: priceForActivity,
+        txHash: transactionHash,
+      };
+
+      await NftActivity.create(activityData);
 
       return res.json({
         success: true,
@@ -754,14 +969,134 @@ const blockchainController = {
     }
   },
 
+  async getHighestBidOffer(req, res) {
+    try {
+      const { id } = req.params;
+      if (!id) {
+        return res
+          .status(HTTP_STATUS.BAD_REQUEST)
+          .send({ error: 'Token id is required' });
+      }
+
+      const data = await mongoose
+        .model(MODALS.BID)
+        .find({ tokenId: id })
+        .sort({ maticPrice: -1 })
+        .populate({
+          path: COMMON.USER_ID,
+          model: MODALS.PROFILE,
+        });
+
+      res.json({ data });
+    } catch (error) {
+      res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).send(error);
+    }
+  },
+
+  async createBid({ tokenId, userId, usdPrice, maticPrice }) {
+    try {
+      const highestBid = await mongoose
+        .model(MODALS.BID)
+        .findOne({ tokenId })
+        .sort({ maticPrice: -1 })
+        .limit(1)
+        .populate({
+          path: COMMON.USER_ID,
+          model: MODALS.PROFILE,
+        });
+
+      const isHighestBidder = highestBid?.userId?._id?.toString() === userId;
+
+      const response = await mongoose
+        .model(MODALS.BID)
+        .findOneAndUpdate(
+          { tokenId, userId },
+          { usdPrice, maticPrice },
+          { new: true, upsert: true },
+        );
+
+      const sendEmail = highestBid && !isHighestBidder;
+
+      if (sendEmail) {
+        const nft = await mongoose.model(MODALS.NFT).findOne({ _id: tokenId });
+
+        queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+          type: 'bidder',
+          email: highestBid?.userId?.email,
+          username: highestBid?.userId?.username,
+          websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${nft?._id}`,
+          inventionTitle: nft?.name,
+          inventionUrl: `${process.env.CLIENT_HOST}/inventions/${nft?.invention}`,
+          bidAmount: response?.maticPrice,
+        });
+
+        // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+        //   await sendNftBidderEmail(item.data);
+        // });
+      }
+    } catch (error) {
+      throw error;
+    }
+  },
+
   async bidTransaction(req, res) {
     try {
-      const { auctionId, bidAmount } = req.body;
-      if (!auctionId || !bidAmount) {
+      const { auctionId, bidAmount, usdPrice, walletAddress } = req.body;
+      if (!auctionId || !bidAmount || !usdPrice || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      // Verify seller cannot bid on their own NFT
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        provider,
+      );
+      const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const sellerAddress = auctionData.nftOwner.toLowerCase();
+      const bidderAddress = signer.address.toLowerCase();
+
+      if (bidderAddress === sellerAddress) {
+        return res.status(403).json({
+          success: false,
+          error: 'Seller cannot bid on their own NFT',
+        });
+      }
+
+      // Check auction start and end times
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const auctionStartTime = Number(auctionData.auctionStartTime.toString());
+      const auctionEndTime = Number(auctionData.auctionEndTime.toString());
+
+      if (currentTimestamp < auctionStartTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction has not started yet',
+        });
+      }
+
+      if (currentTimestamp >= auctionEndTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time has been reached. Cannot place bid.',
+        });
+      }
+
+      // Check NFT expiry time from contract before bidding
+      const tokenId = Number(auctionData.tokenId.toString());
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot place bid.',
+        });
+      }
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
@@ -773,16 +1108,40 @@ const blockchainController = {
         value: ethers.utils.parseUnits(bidAmount, 'ether'),
       });
 
-      const receipt = await bidTxn.wait();
+      const receipt = await bidTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      /***********************************************/
+      const nft = await NFT.findOne({ tokenId: auctionId });
+
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      // ********************** nftActivity Table update *******************
+      const activityData = {
+        nft: nft._id,
+        from: from,
+        to: to,
+        event: NFT_EVENTS.BID,
+        price: bidAmount,
+        txHash: transactionHash,
+      };
+
+      await NftActivity.create(activityData);
+
+      await blockchainController.createBid({
+        tokenId: nft._id,
+        userId: req.user.id,
+        usdPrice,
+        maticPrice: Number(bidAmount),
+      });
 
       return res.json({
         success: true,
         message: COMMON.BID_TRANSACTION_SUCCESS,
-        transactionHash,
-        from,
-        to,
+        transactionHash: transactionHash,
       });
     } catch (e) {
       return res.status(500).json({
@@ -794,12 +1153,16 @@ const blockchainController = {
 
   async acceptOfferTransaction(req, res) {
     try {
-      const { auctionId } = req.body;
-      if (!auctionId) {
+      const { auctionId, bidOwnerId, walletAddress } = req.body;
+      if (!auctionId || !bidOwnerId || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
@@ -807,18 +1170,96 @@ const blockchainController = {
         signer,
       );
 
+      // Check auction end time before accepting offer
+      const auctionData = await ideaMarketplaceContract.auction(auctionId);
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const auctionEndTime = Number(auctionData.auctionEndTime.toString());
+
+      if (currentTimestamp >= auctionEndTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time has been reached. Cannot accept offer.',
+        });
+      }
+
+      // Check NFT expiry time from contract before accepting offer
+      const tokenId = Number(auctionData.tokenId.toString());
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot accept offer.',
+        });
+      }
+
       const acceptOfferTxn =
         await ideaMarketplaceContract.auctionEnd(auctionId);
       const receipt = await acceptOfferTxn.wait();
 
       const { transactionHash, from, to } = receipt;
 
+      // ********************** Update NFT Table **************************
+      const nft = await NFT.findOne({ tokenId: auctionId });
+
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      const updatedData = {
+        isListed: false,
+        onAuction: false,
+        maticPrice: null,
+        usdPrice: null,
+        owner: bidOwnerId,
+        expiryDate: null,
+        auctionStartTime: null,
+        event: NFT_EVENTS.ACCEPT,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+      // ********************** nftActivity Table update *******************
+      const activityData = {
+        nft: nft._id,
+        from: from,
+        to: to,
+        event: NFT_EVENTS.ACCEPT,
+        price: null,
+        txHash: transactionHash,
+      };
+
+      await NftActivity.create(activityData);
+
+      // ********************** BID Table update **************************
+      const bidCount = await mongoose
+        .model(MODALS.BID)
+        .countDocuments({ tokenId: nft._id });
+      if (bidCount >= 1) {
+        await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
+      }
+
+      // ********************** APPLICATION Table update **************************
+      if (nft.invention) {
+        await mongoose
+          .model(MODALS.APPLICATION)
+          .findOneAndUpdate(
+            { _id: nft.invention },
+            { owner: bidOwnerId },
+            { upsert: false },
+          );
+      }
+      const user = await mongoose.model(MODALS.PROFILE).findOne({
+        _id: bidOwnerId,
+        walletAddress: {
+          $ne: '',
+          $exists: true,
+          $type: 'string',
+        },
+      });
+      await blockchainController.distributeIdeaRewards(user?.walletAddress, 2);
       return res.json({
         success: true,
         message: COMMON.NFT_ACCEPT_OFFER_SUCCESS,
-        transactionHash,
-        from,
-        to,
       });
     } catch (e) {
       return res.status(500).json({
@@ -830,12 +1271,33 @@ const blockchainController = {
 
   async claimNftTransaction(req, res) {
     try {
-      const { auctionId } = req.body;
-      if (!auctionId) {
+      const { auctionId, walletAddress } = req.body;
+      if (!auctionId || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      // Verify only the highest bidder can claim
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        require('../contract/IdeaMarketplace.json'),
+        provider,
+      );
+      const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const highestBidderAddress = auctionData.currentBidder.toLowerCase();
+      const claimerAddress = signer.address.toLowerCase();
+
+      if (claimerAddress !== highestBidderAddress) {
+        return res.status(403).json({
+          success: false,
+          error: 'Only the highest bidder can claim this NFT',
+        });
+      }
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
@@ -848,12 +1310,64 @@ const blockchainController = {
 
       const { transactionHash, from, to } = receipt;
 
+      // ********************** Update NFT Table **************************
+      const nft = await NFT.findOne({ tokenId: auctionId });
+
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      const updatedData = {
+        isListed: false,
+        onAuction: false,
+        maticPrice: null,
+        usdPrice: null,
+        owner: req.user.id,
+        expiryDate: null,
+        auctionStartTime: null,
+        event: NFT_EVENTS.CLAIM,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+      // ********************** nftActivity Table update *******************
+      const activityData = {
+        nft: nft._id,
+        from: from,
+        to: to,
+        event: NFT_EVENTS.CLAIM,
+        price: null,
+        txHash: transactionHash,
+      };
+
+      await NftActivity.create(activityData);
+
+      // ********************** BID Table update **************************
+      const bidCount = await mongoose
+        .model(MODALS.BID)
+        .countDocuments({ tokenId: nft._id });
+      if (bidCount >= 1) {
+        await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
+      }
+
+      // ********************** APPLICATION Table update **************************
+      if (nft.invention) {
+        await mongoose
+          .model(MODALS.APPLICATION)
+          .findOneAndUpdate(
+            { _id: nft.invention },
+            { owner: req.user.id },
+            { upsert: false },
+          );
+      }
+      await blockchainController.distributeIdeaRewards(
+        req.user.walletAddress,
+        2,
+      );
+
       return res.json({
         success: true,
         message: COMMON.CLAIM_NFT_SUCCESS,
-        transactionHash,
-        from,
-        to,
       });
     } catch (e) {
       return res.status(500).json({
@@ -864,6 +1378,9 @@ const blockchainController = {
   },
 };
 
+blockchainController.getPrivateKeyForWalletAddress =
+  getPrivateKeyForWalletAddress;
+
 module.exports = blockchainController;
 
 nodeCron.schedule('*/5 * * * *', () => {
@@ -871,3 +1388,30 @@ nodeCron.schedule('*/5 * * * *', () => {
   blockchainController.monitorMaticBalance();
 });
 
+nodeCron.schedule('0 0 * * *', async () => {
+  console.log('Running daily MATIC reward distribution job...');
+  try {
+    const pendingRewards = await mongoose
+      .model(MODALS.REWARD_DISTRIBUTION_HISTORY)
+      .find({ status: PAY_STATUS.PENDING })
+      .populate({ path: COMMON.USER, model: MODALS.PROFILE });
+
+    if (pendingRewards?.length === 0) {
+      console.log('No pending rewards found.');
+      return;
+    }
+
+    for (const reward of pendingRewards) {
+      const jobData = {
+        type: 'crowdfunding',
+        rewardId: reward?._id ?? reward?.id,
+        userId: reward?.user?.id ?? reward?.user?._id,
+        walletAddress: reward?.user?.walletAddress,
+        share: reward?.share,
+      };
+      queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, jobData);
+    }
+  } catch (err) {
+    console.log('MATIC reward distribution job failed:', err);
+  }
+});
