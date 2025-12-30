@@ -28,6 +28,7 @@ const {
   CHANNELS,
   TYPES,
   PAY_STATUS,
+  STAKED_APPLICATION_STATUS,
 } = require('../consts/index');
 const {
   QUEUE_NFT_EMAILS,
@@ -152,7 +153,6 @@ async function getPrivateKeyForListingOwner(userId, listingOwnerAddress) {
   return getPrivateKeyForWalletAddress(userId, listingOwnerAddress);
 }
 
-// Helper function to check NFT expiry time from contract
 async function checkNftExpiryFromContract(tokenId) {
   try {
     const ideaNftContract = new ethers.Contract(
@@ -165,7 +165,7 @@ async function checkNftExpiryFromContract(tokenId) {
     return Number(expiryTime.toString()) <= currentTimestamp;
   } catch (error) {
     console.error('Error checking NFT expiry:', error);
-    return false; // Return false on error to allow transaction (fail-safe)
+    return false;
   }
 }
 
@@ -380,7 +380,6 @@ const blockchainController = {
         return res.status(400).json({ error: 'Wallet address is required' });
       }
 
-      // Check NFT expiry time from contract before approval (if listing for auction)
       const nft = await NFT.findOne({ tokenId });
       if (nft?.onAuction) {
         const isExpired = await checkNftExpiryFromContract(tokenId);
@@ -430,13 +429,31 @@ const blockchainController = {
       }
 
       // ********************** NFT Table Update *******************
-      const nft = await NFT.findOne({ tokenId });
+      const nft = await NFT.findOne({ tokenId }).populate('invention');
 
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
-      // Check NFT expiry time from contract before listing (if on auction)
+      // Check if crowdfunding campaign is active
+      if (nft?.invention?.crowdfundingCampaign) {
+        const CrowdfundingCampaign = mongoose.model(MODALS.CROWDFUNDING_CAMPAIGN);
+        const campaign = await CrowdfundingCampaign.findById(
+          nft.invention.crowdfundingCampaign
+        );
+        if (
+          campaign &&
+          (campaign.status === STAKED_APPLICATION_STATUS.IN_PROGRESS ||
+            campaign.status === STAKED_APPLICATION_STATUS.FULFILLED)
+        ) {
+          return res.status(400).json({
+            success: false,
+            error:
+              'Cannot list Patent Token. A crowdfunding campaign is currently in progress or has been completed.',
+          });
+        }
+      }
+
       if (nft?.onAuction) {
         const isExpired = await checkNftExpiryFromContract(tokenId);
         if (isExpired) {
@@ -446,14 +463,14 @@ const blockchainController = {
           });
         }
 
-        // Check if auction end time has passed
         if (nft?.expiryDate) {
           const currentTime = new Date();
           const auctionEndTime = new Date(nft.expiryDate);
           if (auctionEndTime <= currentTime) {
             return res.status(400).json({
               success: false,
-              error: 'Auction end time has been reached. Cannot list for fixed price.',
+              error:
+                'Auction end time has been reached. Cannot list for fixed price.',
             });
           }
         }
@@ -473,15 +490,6 @@ const blockchainController = {
 
       const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
 
-      const updatedData = {
-        isListed: true,
-        maticPrice: priceInMatic,
-        usdPrice: usdPrice,
-        event: NFT_EVENTS.LIST,
-      };
-
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
-
       const listFixedNftTxn =
         await ideaMarketplaceContract.listNftForFixedPrice(
           tokenId,
@@ -492,6 +500,15 @@ const blockchainController = {
       const receipt = await listFixedNftTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      const updatedData = {
+        isListed: true,
+        maticPrice: priceInMatic,
+        usdPrice: usdPrice,
+        event: NFT_EVENTS.LIST,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       // ********************** nftActivity Table update *******************
       const activityData = {
@@ -756,15 +773,38 @@ const blockchainController = {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      // Validate auction start and end times
       const currentTimestamp = Math.floor(Date.now() / 1000);
       const startTime = Number(auctionStartTime);
       const endTime = Number(auctionEndTime);
+      const twoMinutesInSeconds = 120; // 2 minute buffer for transaction processing
 
-      if (startTime < currentTimestamp || endTime <= currentTimestamp) {
+      if (startTime <= currentTimestamp) {
         return res.status(400).json({
           success: false,
-          error: 'Auction start and end time must be greater than current time',
+          error: 'Auction start time must be greater than current time',
+        });
+      }
+
+      if (startTime <= currentTimestamp + twoMinutesInSeconds) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Please increase auction start time as transaction takes time. Auction start time must be at least 2 minutes in the future.',
+        });
+      }
+
+      if (endTime <= currentTimestamp) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time must be greater than current time',
+        });
+      }
+
+      if (endTime <= currentTimestamp + twoMinutesInSeconds) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Please increase auction end time as transaction takes time. Auction end time must be at least 2 minutes in the future.',
         });
       }
 
@@ -775,14 +815,6 @@ const blockchainController = {
         });
       }
 
-      // ********************** NFT Table Update *******************
-      const nft = await NFT.findOne({ tokenId });
-
-      if (!nft) {
-        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
-      }
-
-      // Check NFT expiry time from contract before listing for auction
       const isExpired = await checkNftExpiryFromContract(tokenId);
       if (isExpired) {
         return res.status(400).json({
@@ -803,18 +835,33 @@ const blockchainController = {
         signer,
       );
 
-      const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
-      const updatedData = {
-        isListed: true,
-        maticPrice: priceInMatic,
-        usdPrice: usdPrice,
-        onAuction: true,
-        expiryDate: new Date(auctionEndTime * 1000),
-        auctionStartTime: new Date(auctionStartTime * 1000),
-        event: NFT_EVENTS.LIST,
-      };
+      // ********************** NFT Table Update *******************
+      const nft = await NFT.findOne({ tokenId }).populate('invention');
 
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+      if (!nft) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      // Check if crowdfunding campaign is active
+      if (nft?.invention?.crowdfundingCampaign) {
+        const CrowdfundingCampaign = mongoose.model(MODALS.CROWDFUNDING_CAMPAIGN);
+        const campaign = await CrowdfundingCampaign.findById(
+          nft.invention.crowdfundingCampaign
+        );
+        if (
+          campaign &&
+          (campaign.status === STAKED_APPLICATION_STATUS.IN_PROGRESS ||
+            campaign.status === STAKED_APPLICATION_STATUS.FULFILLED)
+        ) {
+          return res.status(400).json({
+            success: false,
+            error:
+              'Cannot list Patent Token. A crowdfunding campaign is currently in progress or has been completed.',
+          });
+        }
+      }
+
+      const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
 
       const listAuctionNftTxn =
         await ideaMarketplaceContract.listItemForAuction(
@@ -828,6 +875,18 @@ const blockchainController = {
       const receipt = await listAuctionNftTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      const updatedData = {
+        isListed: true,
+        maticPrice: priceInMatic,
+        usdPrice: usdPrice,
+        onAuction: true,
+        expiryDate: new Date(auctionEndTime * 1000),
+        auctionStartTime: new Date(auctionStartTime * 1000),
+        event: NFT_EVENTS.LIST,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       // ********************** nftActivity Table update *******************
       const activityData = {
@@ -1069,7 +1128,6 @@ const blockchainController = {
         });
       }
 
-      // Check auction start and end times
       const currentTimestamp = Math.floor(Date.now() / 1000);
       const auctionStartTime = Number(auctionData.auctionStartTime.toString());
       const auctionEndTime = Number(auctionData.auctionEndTime.toString());
@@ -1170,7 +1228,6 @@ const blockchainController = {
         signer,
       );
 
-      // Check auction end time before accepting offer
       const auctionData = await ideaMarketplaceContract.auction(auctionId);
       const currentTimestamp = Math.floor(Date.now() / 1000);
       const auctionEndTime = Number(auctionData.auctionEndTime.toString());
@@ -1182,7 +1239,6 @@ const blockchainController = {
         });
       }
 
-      // Check NFT expiry time from contract before accepting offer
       const tokenId = Number(auctionData.tokenId.toString());
       const isExpired = await checkNftExpiryFromContract(tokenId);
       if (isExpired) {
