@@ -1874,4 +1874,3 @@ export const getNftAuctionExpireTime = async (tokenId: string) => {
   const data = await marketplaceContract.auction(tokenId);
   return data.auctionEndTime;
 };
-
