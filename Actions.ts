@@ -43,7 +43,6 @@ import {
   CLOSE_CLAIM_SUCCESS_MODAL
 } from './types';
 import { Constants } from 'utilities/constants';
-
 export const buyNft = (
   fixedId: string,
   priceOfNft: object,
