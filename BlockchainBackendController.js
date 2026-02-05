@@ -1,9 +1,20 @@
+/* eslint-disable no-shadow */
+/* eslint-disable no-useless-catch */
+/* eslint-disable max-lines-per-function */
+/* eslint-disable complexity */
+/* eslint-disable no-magic-numbers */
+/* eslint-disable no-console */
+/* eslint-disable no-else-return */
+/* eslint-disable max-lines */
+/* eslint-disable no-await-in-loop */
+/* eslint-disable prefer-const */
+
 const mongoose = require('mongoose');
 const { config } = require('dotenv');
 const { ethers } = require('ethers');
 const { resolve } = require('path');
 const nodeCron = require('node-cron');
-const emailService = require('../helpers/email');
+const { getDecryptedPrivateKey } = require('../helpers/encryptionHooks');
 const { RewardIteration } = require('../models/RewardIteration');
 const {
   ERRORS,
@@ -16,21 +27,33 @@ const {
   COMMON,
   CHANNELS,
   TYPES,
+  PAY_STATUS,
+  QUOTATION_STATUS,
+  STAKED_APPLICATION_STATUS,
 } = require('../consts/index');
 const {
   QUEUE_NFT_EMAILS,
   queueDb,
   SEND_CLAIM_YOUR_REWARD_EMAIL,
+  QUEUE_REWARD_DISTRIBUTE,
 } = require('../helpers/queueDb');
 const pusher = require('../pusherConfig');
 const { NFT } = require('../models/NFT');
 const { NftActivity } = require('../models/nftActivity');
-const { subtractCredits, triggerCreditsPusher } = require('../helpers/credits');
-const { ObjectId } = require('mongodb');
-const { sendNftBidderEmail } = require('../helpers/nft');
+const { Quotation } = require('../models/Quotation');
 const {
-  distributeRewardToInfluencer,
-} = require('../helpers/rewardDistribution');
+  subtractCredits,
+  isCompanyEmployeeOrOwner,
+} = require('../helpers/credits');
+const { ObjectId } = require('mongodb');
+const { completeCampaign } = require('../helpers/rewardDistribution');
+const IdeaMarketplaceAbi = require('../contract/IdeaMarketplace.json');
+const {
+  ideaCoinContract,
+  provider,
+  wallet,
+  updateUser,
+} = require('../helpers/blockchain');
 
 // Load environment variables
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -39,27 +62,9 @@ config({ path: envPath });
 
 // Initialize Ethereum provider, wallet, and contract
 const {
-  INFURA_URL: providerUrl,
-  PRIVATE_KEY: privateKey,
-  IDEACOIN_CONTRACT_ADDRESS: IdeaContractAddress,
-  MATIC_CONTRACT_ADDRESS: maticContractAddress,
   MARKETPLACE_CONTRACT_ADDRESS: marketplaceContractAddress,
   NFT_CONTRACT_ADDRESS: nftContractAddress,
-  CURRENCY,
-  COINBASE_API_URL,
 } = process.env;
-const provider = new ethers.providers.JsonRpcProvider(providerUrl);
-const wallet = new ethers.Wallet(privateKey, provider);
-const ideaCoinContract = new ethers.Contract(
-  IdeaContractAddress,
-  require('../contract/IdeaCoins.json'),
-  wallet,
-);
-const maticContract = new ethers.Contract(
-  maticContractAddress,
-  require('../contract/MaticToken.json'),
-  provider,
-);
 
 async function _getEligibleAddresses() {
   const users = await mongoose.model(MODALS.PROFILE).find({
@@ -76,7 +81,7 @@ async function _getEligibleAddresses() {
     try {
       user = user.toObject();
       const ideaCoins = await ideaCoinContract.balanceOf(user.walletAddress);
-      if (ideaCoins > 0) {
+      if (ideaCoins.gt(0)) {
         eligibleUsers.push({
           ...user,
           ideaCoins,
@@ -87,24 +92,6 @@ async function _getEligibleAddresses() {
     }
   }
   return eligibleUsers;
-}
-
-async function updateUser(id, updateObj) {
-  const query = { _id: id };
-  try {
-    const result = await mongoose
-      .model(MODALS.PROFILE)
-      .findOneAndUpdate(query, updateObj, { new: true });
-
-    if (!result) {
-      console.error(`Document with id ${id} not found`);
-      return null;
-    }
-    return result;
-  } catch (error) {
-    console.error(`Error updating document with id ${id}:`, error);
-    throw error;
-  }
 }
 
 async function insertRewardIteration(threshold) {
@@ -127,70 +114,69 @@ async function getLatestRewardIteration() {
   }
 }
 
-const fetchLivePrices = async () => {
-  const url = COINBASE_API_URL;
-  const currencies = ['USD', 'BTC', 'ETH'];
-
-  try {
-    const response = await fetch(`${url}?currency=${CURRENCY}`);
-    const data = await response.json();
-    const rates = data.data.rates;
-
-    const results = {};
-    currencies.forEach((currency) => {
-      if (rates[currency]) {
-        results[currency] = parseFloat(parseFloat(rates[currency]).toFixed(8));
-      }
-    });
-
-    return results;
-  } catch (error) {
-    console.error(ERRORS.FETCHING_LIVE_PRICES, error.message);
-  }
-};
-
 const formatBalance = (balance) => {
   return parseFloat(ethers.utils.formatUnits(balance, 18));
 };
 
-const convertMaticToCurrency = async (maticAmount) => {
-  try {
-    const prices = await fetchLivePrices();
-    return {
-      usd: maticAmount * prices.USD,
-      btc: maticAmount * prices.BTC,
-      eth: maticAmount * prices.ETH,
-    };
-  } catch (error) {
-    console.error(ERRORS.FAILED_TO_CONVERT_MATIC, error);
-  }
-};
-
-async function sendClaimYourRewardEmail(user, share) {
-  try {
-    const currencies = await convertMaticToCurrency(share);
-    await emailService.sendClaimYourRewardEmail({
-      email: user.email,
-      recipientFirstName: user.firstName | user.username,
-      user: user.firstName || user.username || user.email,
-      userLinkUrl: `${process.env.CLIENT_HOST}/${COMMON.PROFILES}/${user.key}`,
-      rewardAmount: share,
-      amountUSD: currencies.usd,
-      amountBTC: currencies.btc,
-      amountETH: currencies.eth,
-      mainImage: user?.files[0]?.url,
-    });
-  } catch (error) {
-    console.log(ERRORS.MAIL_SENDING_ERROR, error.message);
-  }
-}
-
 async function sendEmailViaQueue(user, share) {
   queueDb.addToQueue(SEND_CLAIM_YOUR_REWARD_EMAIL, { user, share });
-  queueDb.createWorker(SEND_CLAIM_YOUR_REWARD_EMAIL, async (item) => {
-    const { user, share } = item.data;
-    await sendClaimYourRewardEmail(user, share);
+  // queueDb.createWorker(SEND_CLAIM_YOUR_REWARD_EMAIL, async (item) => {
+  //   const { user, share } = item.data;
+  //   await sendClaimYourRewardEmail(user, share);
+  // });
+}
+
+async function getPrivateKeyForWalletAddress(userId, targetWalletAddress) {
+  const adminWalletAddress = wallet?.address?.toLowerCase();
+  const targetAddress = targetWalletAddress?.toLowerCase();
+
+  if (
+    adminWalletAddress &&
+    targetAddress &&
+    adminWalletAddress === targetAddress
+  ) {
+    return process.env.PRIVATE_KEY;
+  }
+
+  const Tag = mongoose.model(MODALS.TAG);
+  const company = await Tag.findOne({
+    $or: [{ owner: userId }, { employees: { $in: [userId] } }],
   });
+
+  // Check if wallet belongs to company
+  if (company?.walletAddress?.toLowerCase() === targetAddress) {
+    return getDecryptedPrivateKey(company);
+  }
+
+  // Check if wallet belongs to user
+  const userProfile = await mongoose.model(MODALS.PROFILE).findById(userId);
+  if (userProfile?.walletAddress?.toLowerCase() === targetAddress) {
+    return getDecryptedPrivateKey(userProfile);
+  }
+
+  throw new Error(
+    `Wallet address does not match user, company, or admin wallet. Admin: ${adminWalletAddress}, Target: ${targetAddress}, User: ${userProfile?.walletAddress?.toLowerCase()}`,
+  );
+}
+
+async function getPrivateKeyForListingOwner(userId, listingOwnerAddress) {
+  return getPrivateKeyForWalletAddress(userId, listingOwnerAddress);
+}
+
+async function checkNftExpiryFromContract(tokenId) {
+  try {
+    const ideaNftContract = new ethers.Contract(
+      nftContractAddress,
+      require('../contract/IdeaNft.json'),
+      provider,
+    );
+    const expiryTime = await ideaNftContract.getNFTExpireTime(tokenId);
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    return Number(expiryTime.toString()) <= currentTimestamp;
+  } catch (error) {
+    console.error('Error checking NFT expiry:', error);
+    return false;
+  }
 }
 
 // Blockchain controller object
@@ -232,7 +218,7 @@ const blockchainController = {
         (event) => event.event === EVENTS.REWARD_DISTRIBUTED,
       );
       const adjustedAmountEth = ethers.utils.formatEther(
-        rewardEvent.args.recipient,
+        rewardEvent.args.amount,
       );
 
       return {
@@ -256,7 +242,7 @@ const blockchainController = {
     }
   },
 
-  distributeMaticRewards: async (req, res) => {
+  distributeEthRewards: async (req, res) => {
     try {
       const { walletAddress: address, share: amount } = await mongoose
         .model(MODALS.PROFILE)
@@ -270,8 +256,8 @@ const blockchainController = {
         throw new Error(ERRORS.INVALID_ADDRESS);
       }
 
-      const maticAmount = ethers.utils.parseUnits(amount.toString(), 18);
-      if (maticAmount.lte(0)) {
+      const ethAmount = ethers.utils.parseUnits(amount.toString(), 18);
+      if (ethAmount.lte(0)) {
         throw new Error(ERRORS.INVALID_AMOUNT);
       }
 
@@ -280,9 +266,9 @@ const blockchainController = {
         throw new Error(ERRORS.IDEACOINS_INSUFFICIENT);
       }
 
-      const ownerMaticBalance = await maticContract.balanceOf(wallet.address);
-      if (maticAmount.gte(ownerMaticBalance)) {
-        throw new Error(ERRORS.MATIC_INSUFFICIENT);
+      const ownerEthBalance = await provider.getBalance(wallet.address);
+      if (ethAmount.gt(ownerEthBalance)) {
+        throw new Error(ERRORS.ETH_INSUFFICIENT);
       }
 
       pusher.trigger(
@@ -293,18 +279,7 @@ const blockchainController = {
           message: COMMON.REWARDS_INITIATED,
         },
       );
-      async function approveMaticSpend(owner, spender, amount) {
-        const tx = await maticContract.connect(wallet).approve(spender, amount);
-        await tx.wait();
-      }
 
-      await approveMaticSpend(
-        wallet.address,
-        ideaCoinContract.address,
-        maticAmount,
-      );
-
-      // Distribute MATIC rewards
       pusher.trigger(
         `${CHANNELS.DISTRIBUTE_REWARD}-${address}`,
         EVENTS.LOADING,
@@ -313,9 +288,13 @@ const blockchainController = {
           message: COMMON.FEW_MORE_MOMENTS,
         },
       );
-      const tx = await ideaCoinContract.distributeMaticReward(
+
+      const tx = await ideaCoinContract.distributeEthReward(
         address,
-        maticAmount,
+        ethAmount,
+        {
+          value: ethAmount,
+        },
       );
 
       await tx.wait();
@@ -333,7 +312,7 @@ const blockchainController = {
 
       res.json({
         success: true,
-        message: COMMON.MATIC_REWARD_DISTRIBUTED,
+        message: COMMON.ETH_REWARD_DISTRIBUTED,
       });
     } catch (error) {
       console.error(ERRORS.TRANSACTION_FAILED, error);
@@ -344,16 +323,16 @@ const blockchainController = {
     }
   },
 
-  monitorMaticBalance: async () => {
+  monitorEthBalance: async () => {
     try {
-      const ownerMaticBalance = await provider.getBalance(wallet.address);
+      const ownerEthBalance = await provider.getBalance(wallet.address);
       console.log(
-        `Checked owner's MATIC balance: ${ethers.utils.formatEther(
-          ownerMaticBalance,
-        )} MATIC`,
+        `Checked owner's ETH balance: ${ethers.utils.formatEther(
+          ownerEthBalance,
+        )} ETH`,
       );
       const { threshold } = await getLatestRewardIteration();
-      if (ethers.utils.formatEther(ownerMaticBalance) >= threshold) {
+      if (ethers.utils.formatEther(ownerEthBalance) >= threshold) {
         console.log('Threshold met. Checking eligible addresses...');
         const eligibleUsers = await _getEligibleAddresses(); // Get Users that have IdeaCoins > 0
 
@@ -374,32 +353,56 @@ const blockchainController = {
           await updateUser(obj.id, {
             $inc: { share: obj.userShare.toFixed(12) },
           });
+          await mongoose.model(MODALS.REWARD_DISTRIBUTION_HISTORY).create({
+            user: obj.id,
+            share: obj.userShare.toFixed(12),
+            status: PAY_STATUS.PENDING,
+          });
         });
 
-        const maticThreshold = (threshold * 125) / 100;
-        await insertRewardIteration(maticThreshold);
-        console.log(`New threshold is ${maticThreshold} MATIC`);
+        const ethThreshold = (threshold * 125) / 100;
+        await insertRewardIteration(ethThreshold);
+        console.log(`New threshold is ${ethThreshold} ETH`);
         return;
       } else {
         console.log('Threshold not met. No action taken.');
       }
     } catch (error) {
-      console.error(ERRORS.MATIC_BALANCE_MONITORING_ERROR, error);
+      console.error(ERRORS.ETH_BALANCE_MONITORING_ERROR, error);
     }
   },
 
   nftApprovalTransaction: async (req, res) => {
     try {
-      const { tokenId } = req.body;
+      const { tokenId, walletAddress } = req.body;
       if (!tokenId) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      if (!walletAddress) {
+        return res.status(400).json({ error: 'Wallet address is required' });
+      }
+
+      const nft = await NFT.findOne({ tokenId });
+      if (nft?.onAuction) {
+        const isExpired = await checkNftExpiryFromContract(tokenId);
+        if (isExpired) {
+          return res.status(400).json({
+            success: false,
+            error: 'NFT has expired. Cannot approve for listing.',
+          });
+        }
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaNftContract = new ethers.Contract(
         process.env.NFT_CONTRACT_ADDRESS,
-        require('../contract/IdeaMarketplace.json'),
+        require('../contract/IdeaNft.json'),
         signer,
       );
 
@@ -423,36 +426,94 @@ const blockchainController = {
 
   listFixedNftTransaction: async (req, res) => {
     try {
-      const { tokenId, listPrice, usdPrice } = req.body;
-      if (!tokenId || !listPrice || !usdPrice) {
+      const { tokenId, listPrice, usdPrice, walletAddress } = req.body;
+      if (!tokenId || !listPrice || !usdPrice || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
-
-      const ideaMarketplaceContract = new ethers.Contract(
-        marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
-        signer,
-      );
-
       // ********************** NFT Table Update *******************
-      const nft = await NFT.findOne({ tokenId });
+      const nft = await NFT.findOne({ tokenId }).populate({
+        path: 'invention',
+        populate: {
+          path: 'crowdfundingCampaign',
+          select: 'status',
+        },
+      });
 
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
+      const invention = nft?.invention;
+      if (!invention) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
+
+      const inventionId = invention._id || invention;
+      const { quotationRequest, acceptedQuotation, crowdfundingCampaign } =
+        invention;
+
+      const isCampaignFulfilled =
+        crowdfundingCampaign &&
+        (typeof crowdfundingCampaign === 'object'
+          ? crowdfundingCampaign.status
+          : null) === STAKED_APPLICATION_STATUS.FULFILLED;
+
+      if (!isCampaignFulfilled) {
+        const blockingQuotations = await Quotation.find({
+          invention: inventionId,
+          status: {
+            $in: [QUOTATION_STATUS.SENT, QUOTATION_STATUS.ACCEPTED],
+          },
+        });
+
+        if (
+          quotationRequest ||
+          acceptedQuotation ||
+          (blockingQuotations && blockingQuotations.length > 0)
+        ) {
+          return res.status(400).json({
+            success: false,
+            error: ERRORS.CANNOT_LIST_PATENT_TOKEN_QUOTATION_EXISTS,
+          });
+        }
+      }
+
+      if (nft?.onAuction) {
+        const isExpired = await checkNftExpiryFromContract(tokenId);
+        if (isExpired) {
+          return res.status(400).json({
+            success: false,
+            error: 'NFT has expired. Cannot list for fixed price.',
+          });
+        }
+
+        if (nft?.expiryDate) {
+          const currentTime = new Date();
+          const auctionEndTime = new Date(nft.expiryDate);
+          if (auctionEndTime <= currentTime) {
+            return res.status(400).json({
+              success: false,
+              error:
+                'Auction end time has been reached. Cannot list for fixed price.',
+            });
+          }
+        }
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        signer,
+      );
+
       const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
-
-      const updatedData = {
-        isListed: true,
-        maticPrice: priceInMatic,
-        usdPrice: usdPrice,
-        event: NFT_EVENTS.LIST,
-      };
-
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       const listFixedNftTxn =
         await ideaMarketplaceContract.listNftForFixedPrice(
@@ -464,6 +525,15 @@ const blockchainController = {
       const receipt = await listFixedNftTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      const updatedData = {
+        isListed: true,
+        maticPrice: priceInMatic,
+        usdPrice: usdPrice,
+        event: NFT_EVENTS.LIST,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       // ********************** nftActivity Table update *******************
       const activityData = {
@@ -483,12 +553,19 @@ const blockchainController = {
         action: CREDIT_ACTIONS.LIST_NFT,
       };
 
+      const isOwnerOrEmployee = await isCompanyEmployeeOrOwner(
+        req?.user?.id,
+        nft,
+      );
+
       await subtractCredits(
         req.user.id,
         10,
         creditsHistory,
         null,
         GENERATION_TYPES.NFT_TRANSACTION,
+        false,
+        isOwnerOrEmployee,
       );
 
       return res.json({
@@ -530,11 +607,25 @@ const blockchainController = {
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      // Get listing owner from the contract (not on-chain NFT owner, as NFT is in marketplace)
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        provider,
+      );
+      const fixedPriceData =
+        await ideaMarketplaceContractRead.fixedPrice(tokenId);
+      const listingOwnerAddress = fixedPriceData.owner.toLowerCase();
+
+      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+        req.user.id,
+        listingOwnerAddress,
+      );
+      const signer = new ethers.Wallet(ownerPrivateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
@@ -572,16 +663,50 @@ const blockchainController = {
 
   buyFixedTransaction: async (req, res) => {
     try {
-      const { tokenId, priceOfNft } = req.body;
+      const { tokenId, priceOfNft, walletAddress } = req.body;
       if (!tokenId || !priceOfNft) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const targetWalletAddress = walletAddress || req.user.walletAddress;
+
+      if (!targetWalletAddress) {
+        return res.status(400).json({
+          success: false,
+          message: 'Wallet address is required',
+        });
+      }
+
+      // Get the private key for the wallet address (verifies it belongs to user or their company)
+      let privateKey;
+      try {
+        privateKey = await getPrivateKeyForWalletAddress(
+          req.user.id || req.user._id,
+          targetWalletAddress,
+        );
+      } catch (error) {
+        console.error(
+          '[buyFixedTransaction] Error getting private key:',
+          error,
+        );
+        return res.status(500).json({
+          success: false,
+          message: `Private key not found: ${error.message}`,
+        });
+      }
+
+      if (!privateKey) {
+        return res.status(500).json({
+          success: false,
+          message: 'Private key not found',
+        });
+      }
+
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
@@ -602,8 +727,27 @@ const blockchainController = {
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
+      // Convert priceOfNft to BigNumber
+      let priceOfNftBigNumber;
+      try {
+        const hexValue =
+          typeof priceOfNft === 'string'
+            ? priceOfNft
+            : priceOfNft?._hex || priceOfNft?.hex;
+        priceOfNftBigNumber = ethers.BigNumber.from(hexValue);
+      } catch (conversionError) {
+        console.error(
+          '[buyFixedTransaction] Error converting priceOfNft to BigNumber:',
+          conversionError.message,
+        );
+        return res.status(400).json({
+          success: false,
+          message: `Invalid priceOfNft format: ${conversionError.message}`,
+        });
+      }
+
       const buyTx = await ideaMarketplaceContract.buyFixedPriceNft(tokenId, {
-        value: priceOfNft,
+        value: priceOfNftBigNumber,
       });
 
       const receipt = await buyTx.wait();
@@ -622,7 +766,30 @@ const blockchainController = {
       }
 
       // ********************** nftActivity Table update *******************
-      const priceInMatic = ethers.utils.formatUnits(priceOfNft, 18);
+      let priceInMatic;
+      try {
+        if (
+          !priceOfNftBigNumber ||
+          !ethers.BigNumber.isBigNumber(priceOfNftBigNumber)
+        ) {
+          throw new Error(
+            'priceOfNftBigNumber is not a valid BigNumber before formatUnits',
+          );
+        }
+        priceInMatic = ethers.utils.formatUnits(priceOfNftBigNumber, 18);
+      } catch (formatError) {
+        console.error('[buyFixedTransaction] Error in formatUnits:', {
+          error: formatError.message,
+          priceOfNftBigNumber,
+          isBigNumber: priceOfNftBigNumber
+            ? ethers.BigNumber.isBigNumber(priceOfNftBigNumber)
+            : false,
+        });
+        return res.status(500).json({
+          success: false,
+          message: `Error formatting price: ${formatError.message}`,
+        });
+      }
       const activityData = {
         nft: nft._id,
         from: from,
@@ -633,27 +800,43 @@ const blockchainController = {
       };
 
       await NftActivity.create(activityData);
-      await blockchainController.distributeIdeaRewards(
-        req.user.walletAddress,
-        2,
-      );
+
+      const company = await mongoose.model(MODALS.TAG).findOne({
+        $or: [
+          { owner: req?.user?.id },
+          { employees: { $in: [req?.user?.id] } },
+        ],
+      });
+
+      if (
+        company?.walletAddress?.toLowerCase() ===
+        targetWalletAddress.toLowerCase()
+      ) {
+        await blockchainController.distributeIdeaRewards(
+          company.walletAddress,
+          2,
+        );
+      } else {
+        await blockchainController.distributeIdeaRewards(
+          targetWalletAddress,
+          2,
+        );
+      }
 
       const reward = 2 * 0.1;
 
-      const rewardDetails = await distributeRewardToInfluencer(
+      // Always attempt campaign reward distribution
+      const campaignWalletAddress = await completeCampaign(
         req.user.id,
         nft._id,
-        reward,
         TYPES.NFT,
         COMMON.PURCHASED_NFT,
       );
 
-      if (rewardDetails) {
-        const { walletAddress, rewardAmount } = rewardDetails;
-
+      if (campaignWalletAddress) {
         await blockchainController.distributeIdeaRewards(
-          walletAddress,
-          rewardAmount,
+          campaignWalletAddress,
+          reward,
         );
       }
 
@@ -662,6 +845,12 @@ const blockchainController = {
         message: COMMON.BUY_NFT_FIXED_SUCCESS,
       });
     } catch (e) {
+      console.error('[buyFixedTransaction] Error caught:', {
+        message: e.message,
+        stack: e.stack,
+        error: e,
+        reqBody: req.body,
+      });
       return res.status(500).json({
         success: false,
         message: `${ERRORS.BUY_FIXED_TRANSACTION_FAILED}: ${e.message}`,
@@ -671,46 +860,137 @@ const blockchainController = {
 
   listAuctionNftTransaction: async (req, res) => {
     try {
-      const { listPrice, auctionStartTime, auctionEndTime, tokenId, usdPrice } =
-        req.body;
+      const {
+        listPrice,
+        auctionStartTime,
+        auctionEndTime,
+        tokenId,
+        usdPrice,
+        walletAddress,
+      } = req.body;
 
       if (
         !tokenId ||
         !listPrice ||
         !auctionStartTime ||
         !auctionEndTime ||
-        !usdPrice
+        !usdPrice ||
+        !walletAddress
       ) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const startTime = Number(auctionStartTime);
+      const endTime = Number(auctionEndTime);
+      const twoMinutesInSeconds = 120; // 2 minute buffer for transaction processing
+
+      if (startTime <= currentTimestamp) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction start time must be greater than current time',
+        });
+      }
+
+      if (startTime <= currentTimestamp + twoMinutesInSeconds) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Please increase auction start time as transaction takes time. Auction start time must be at least 2 minutes in the future.',
+        });
+      }
+
+      if (endTime <= currentTimestamp) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time must be greater than current time',
+        });
+      }
+
+      if (endTime <= currentTimestamp + twoMinutesInSeconds) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Please increase auction end time as transaction takes time. Auction end time must be at least 2 minutes in the future.',
+        });
+      }
+
+      if (startTime >= endTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction start time must be less than end time',
+        });
+      }
+
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot list for auction.',
+        });
+      }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
       // ********************** NFT Table Update *******************
-      const nft = await NFT.findOne({ tokenId });
+      const nft = await NFT.findOne({ tokenId }).populate({
+        path: 'invention',
+        populate: {
+          path: 'crowdfundingCampaign',
+          select: 'status', // Populate campaign to get status
+        },
+      });
 
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
-      const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
-      const updatedData = {
-        isListed: true,
-        maticPrice: priceInMatic,
-        usdPrice: usdPrice,
-        onAuction: true,
-        expiryDate: new Date(auctionEndTime * 1000),
-        auctionStartTime: new Date(auctionStartTime * 1000),
-        event: NFT_EVENTS.LIST,
-      };
+      const invention = nft?.invention;
+      if (!invention) {
+        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      }
 
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+      const inventionId = invention._id || invention;
+      const { quotationRequest, acceptedQuotation, crowdfundingCampaign } =
+        invention;
+
+      const isCampaignFulfilled =
+        crowdfundingCampaign &&
+        (typeof crowdfundingCampaign === 'object'
+          ? crowdfundingCampaign.status
+          : null) === STAKED_APPLICATION_STATUS.FULFILLED;
+
+      if (!isCampaignFulfilled) {
+        const blockingQuotations = await Quotation.find({
+          invention: inventionId,
+          status: {
+            $in: [QUOTATION_STATUS.SENT, QUOTATION_STATUS.ACCEPTED],
+          },
+        });
+
+        if (
+          quotationRequest ||
+          acceptedQuotation ||
+          (blockingQuotations && blockingQuotations.length > 0)
+        ) {
+          return res.status(400).json({
+            success: false,
+            error: ERRORS.CANNOT_LIST_PATENT_TOKEN_QUOTATION_EXISTS,
+          });
+        }
+      }
+
+      const priceInMatic = ethers.utils.formatUnits(listPrice, 18);
 
       const listAuctionNftTxn =
         await ideaMarketplaceContract.listItemForAuction(
@@ -724,6 +1004,18 @@ const blockchainController = {
       const receipt = await listAuctionNftTxn.wait(2);
 
       const { transactionHash, from, to } = receipt;
+
+      const updatedData = {
+        isListed: true,
+        maticPrice: priceInMatic,
+        usdPrice: usdPrice,
+        onAuction: true,
+        expiryDate: new Date(auctionEndTime * 1000),
+        auctionStartTime: new Date(auctionStartTime * 1000),
+        event: NFT_EVENTS.LIST,
+      };
+
+      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
       // ********************** nftActivity Table update *******************
       const activityData = {
@@ -743,12 +1035,19 @@ const blockchainController = {
         action: CREDIT_ACTIONS.LIST_NFT,
       };
 
+      const isOwnerOrEmployee = await isCompanyEmployeeOrOwner(
+        req?.user?.id,
+        nft,
+      );
+
       await subtractCredits(
         req.user.id,
         10,
         creditsHistory,
         null,
         GENERATION_TYPES.NFT_TRANSACTION,
+        false,
+        isOwnerOrEmployee,
       );
 
       return res.json({
@@ -775,14 +1074,6 @@ const blockchainController = {
       if (!tokenId) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
-
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
-
-      const ideaMarketplaceContract = new ethers.Contract(
-        marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
-        signer,
-      );
 
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
@@ -811,8 +1102,30 @@ const blockchainController = {
         await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
       }
 
+      // Get listing owner from the contract (not on-chain NFT owner, as NFT is in marketplace)
+      const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        provider,
+      );
+
+      const auctionData = await ideaMarketplaceContract.auction(tokenId);
+      const auctionOwnerAddress = auctionData.nftOwner.toLowerCase();
+
+      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+        req.user.id,
+        auctionOwnerAddress,
+      );
+
+      const signer = new ethers.Wallet(ownerPrivateKey, provider);
+      const contractWithSigner = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        signer,
+      );
+
       const cancelAuctionNftTxn =
-        await ideaMarketplaceContract.cancelListingForAuction(tokenId);
+        await contractWithSigner.cancelListingForAuction(tokenId);
 
       const receipt = await cancelAuctionNftTxn.wait();
       const { transactionHash, from, to } = receipt;
@@ -896,6 +1209,7 @@ const blockchainController = {
         const nft = await mongoose.model(MODALS.NFT).findOne({ _id: tokenId });
 
         queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+          type: 'bidder',
           email: highestBid?.userId?.email,
           username: highestBid?.userId?.username,
           websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${nft?._id}`,
@@ -904,9 +1218,9 @@ const blockchainController = {
           bidAmount: response?.maticPrice,
         });
 
-        queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
-          await sendNftBidderEmail(item.data);
-        });
+        // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+        //   await sendNftBidderEmail(item.data);
+        // });
       }
     } catch (error) {
       throw error;
@@ -915,16 +1229,65 @@ const blockchainController = {
 
   async bidTransaction(req, res) {
     try {
-      const { auctionId, bidAmount, usdPrice } = req.body;
-      if (!auctionId || !bidAmount || !usdPrice) {
+      const { auctionId, bidAmount, usdPrice, walletAddress } = req.body;
+      if (!auctionId || !bidAmount || !usdPrice || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      // Verify seller cannot bid on their own NFT
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        provider,
+      );
+      const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const sellerAddress = auctionData.nftOwner.toLowerCase();
+      const bidderAddress = signer.address.toLowerCase();
+
+      if (bidderAddress === sellerAddress) {
+        return res.status(403).json({
+          success: false,
+          error: 'Seller cannot bid on their own NFT',
+        });
+      }
+
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const auctionStartTime = Number(auctionData.auctionStartTime.toString());
+      const auctionEndTime = Number(auctionData.auctionEndTime.toString());
+
+      if (currentTimestamp < auctionStartTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction has not started yet',
+        });
+      }
+
+      if (currentTimestamp >= auctionEndTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time has been reached. Cannot place bid.',
+        });
+      }
+
+      // Check NFT expiry time from contract before bidding
+      const tokenId = Number(auctionData.tokenId.toString());
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot place bid.',
+        });
+      }
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
@@ -977,16 +1340,72 @@ const blockchainController = {
 
   async acceptOfferTransaction(req, res) {
     try {
-      const { auctionId, bidOwnerId } = req.body;
-      if ((!auctionId, !bidOwnerId)) {
+      const { auctionId, bidOwnerId, walletAddress } = req.body;
+      if (!auctionId || !bidOwnerId || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        provider,
+      );
+
+      const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      const auctionEndTime = Number(auctionData.auctionEndTime.toString());
+      const nftOwnerAddress = auctionData.nftOwner.toLowerCase();
+
+      if (walletAddress.toLowerCase() !== nftOwnerAddress) {
+        return res.status(403).json({
+          success: false,
+          error: `Wallet address does not match NFT owner. NFT owner: ${nftOwnerAddress}`,
+        });
+      }
+
+      if (auctionData.isSold) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction has already ended. Cannot accept offer.',
+        });
+      }
+
+      if (currentTimestamp >= auctionEndTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'Auction end time has been reached. Cannot accept offer.',
+        });
+      }
+
+      const timeUntilEnd = auctionEndTime - currentTimestamp;
+      const twoMinutesInSeconds = 2 * 60;
+      if (timeUntilEnd < twoMinutesInSeconds) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Accept offer before the 2 minutes from the auction end time as transaction takes time.',
+        });
+      }
+
+      const tokenId = Number(auctionData.tokenId.toString());
+      const isExpired = await checkNftExpiryFromContract(tokenId);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          error: 'NFT has expired. Cannot accept offer.',
+        });
+      }
+
+      // Now get private key and create signer (after verification)
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
@@ -997,7 +1416,7 @@ const blockchainController = {
       const { transactionHash, from, to } = receipt;
 
       // ********************** Update NFT Table **************************
-      const nft = await NFT.findOne({ tokenId: auctionId });
+      const nft = await NFT.findOne({ tokenId: tokenId.toString() });
 
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
@@ -1069,16 +1488,37 @@ const blockchainController = {
 
   async claimNftTransaction(req, res) {
     try {
-      const { auctionId } = req.body;
-      if (!auctionId) {
+      const { auctionId, walletAddress } = req.body;
+      if (!auctionId || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const signer = new ethers.Wallet(req.user.privateKey, provider);
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      // Verify only the highest bidder can claim
+      const ideaMarketplaceContractRead = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        provider,
+      );
+      const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const highestBidderAddress = auctionData.currentBidder.toLowerCase();
+      const claimerAddress = signer.address.toLowerCase();
+
+      if (claimerAddress !== highestBidderAddress) {
+        return res.status(403).json({
+          success: false,
+          error: 'Only the highest bidder can claim this NFT',
+        });
+      }
 
       const ideaMarketplaceContract = new ethers.Contract(
         marketplaceContractAddress,
-        require('../contract/IdeaMarketplace.json'),
+        IdeaMarketplaceAbi,
         signer,
       );
 
@@ -1088,7 +1528,8 @@ const blockchainController = {
       const { transactionHash, from, to } = receipt;
 
       // ********************** Update NFT Table **************************
-      const nft = await NFT.findOne({ tokenId: auctionId });
+      const tokenId = Number(auctionData.tokenId.toString());
+      const nft = await NFT.findOne({ tokenId: tokenId.toString() });
 
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
@@ -1155,9 +1596,310 @@ const blockchainController = {
   },
 };
 
+blockchainController.getPrivateKeyForWalletAddress =
+  getPrivateKeyForWalletAddress;
+
+blockchainController.sendEthereum = async (req, res) => {
+  try {
+    const { to, amount, walletAddress: providedWalletAddress } = req.body;
+
+    if (!to || !ethers.utils.isAddress(to)) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_ADDRESS,
+      });
+    }
+
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_AMOUNT,
+      });
+    }
+
+    let walletAddress = providedWalletAddress;
+    if (!walletAddress) {
+      // Fallback: Get wallet address from user or company
+      walletAddress = req.user.walletAddress;
+      const Tag = mongoose.model(MODALS.TAG);
+      const company = await Tag.findOne({
+        $or: [{ owner: req.user.id }, { employees: { $in: [req.user.id] } }],
+      });
+
+      if (company?.walletAddress) {
+        walletAddress = company.walletAddress;
+      }
+    }
+
+    if (!walletAddress) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+      });
+    }
+
+    const privateKey = await getPrivateKeyForWalletAddress(
+      req.user.id,
+      walletAddress,
+    );
+
+    const signer = new ethers.Wallet(privateKey, provider);
+    const weiAmount = ethers.utils.parseEther(amount.toString());
+
+    const balance = await provider.getBalance(walletAddress);
+    if (balance.lt(weiAmount)) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INSUFFICIENT_BALANCE,
+      });
+    }
+
+    const tx = await signer.sendTransaction({
+      to,
+      value: weiAmount,
+    });
+
+    const receipt = await tx.wait();
+
+    const transactionHash =
+      receipt.transactionHash || receipt.hash || receipt.transaction?.hash;
+    const blockNumber = receipt.blockNumber
+      ? typeof receipt.blockNumber === 'object' && receipt.blockNumber.toString
+        ? receipt.blockNumber.toString()
+        : String(receipt.blockNumber)
+      : null;
+
+    return res.json({
+      success: true,
+      transactionHash: transactionHash,
+      blockNumber: blockNumber,
+      message: COMMON.TRANSACTION_SUCCESS,
+    });
+  } catch (error) {
+    console.error('[sendEthereum] Error:', error);
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+      success: false,
+      message: `${ERRORS.SEND_ETHEREUM_FAILED}: ${error.message}`,
+    });
+  }
+};
+
+blockchainController.approveIdeaCoin = async (req, res) => {
+  try {
+    const { spender, amount, walletAddress: providedWalletAddress } = req.body;
+
+    if (!spender || !ethers.utils.isAddress(spender)) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_ADDRESS,
+      });
+    }
+
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_AMOUNT,
+      });
+    }
+
+    let walletAddress = providedWalletAddress;
+    if (!walletAddress) {
+      // Fallback: Get wallet address from user or company
+      walletAddress = req.user.walletAddress;
+      const Tag = mongoose.model(MODALS.TAG);
+      const company = await Tag.findOne({
+        $or: [{ owner: req.user.id }, { employees: { $in: [req.user.id] } }],
+      });
+
+      if (company?.walletAddress) {
+        walletAddress = company.walletAddress;
+      }
+    }
+
+    if (!walletAddress) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+      });
+    }
+
+    const privateKey = await getPrivateKeyForWalletAddress(
+      req.user.id,
+      walletAddress,
+    );
+
+    const signer = new ethers.Wallet(privateKey, provider);
+    const contractWithSigner = ideaCoinContract.connect(signer);
+
+    const decimals = await ideaCoinContract.decimals();
+    const amountInUnits = ethers.utils.parseUnits(amount.toString(), decimals);
+
+    const balance = await ideaCoinContract.balanceOf(walletAddress);
+    if (balance.lt(amountInUnits)) {
+      console.error('[approveIdeaCoin] Insufficient balance', {
+        walletAddress,
+        balance: balance.toString(),
+        required: amountInUnits.toString(),
+        decimals,
+      });
+
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INSUFFICIENT_BALANCE,
+      });
+    }
+
+    const tx = await contractWithSigner.approve(spender, amountInUnits);
+
+    const receipt = await tx.wait();
+
+    const transactionHash =
+      receipt.transactionHash || receipt.hash || receipt.transaction?.hash;
+    const blockNumber = receipt.blockNumber
+      ? typeof receipt.blockNumber === 'object' && receipt.blockNumber.toString
+        ? receipt.blockNumber.toString()
+        : String(receipt.blockNumber)
+      : null;
+
+    return res.json({
+      success: true,
+      transactionHash: transactionHash,
+      blockNumber: blockNumber,
+      message: COMMON.TRANSACTION_SUCCESS,
+    });
+  } catch (error) {
+    console.error('[approveIdeaCoin] Error:', error);
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+      success: false,
+      message: `Failed to approve IdeaCoin: ${error.message}`,
+    });
+  }
+};
+
+blockchainController.sendRoyaltyCoin = async (req, res) => {
+  try {
+    const { to, amount, walletAddress: providedWalletAddress } = req.body;
+
+    if (!to || !ethers.utils.isAddress(to)) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_ADDRESS,
+      });
+    }
+
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INVALID_AMOUNT,
+      });
+    }
+
+    let walletAddress = providedWalletAddress;
+    if (!walletAddress) {
+      // Fallback: Get wallet address from user or company
+      walletAddress = req.user.walletAddress;
+      const Tag = mongoose.model(MODALS.TAG);
+      const company = await Tag.findOne({
+        $or: [{ owner: req.user.id }, { employees: { $in: [req.user.id] } }],
+      });
+
+      if (company?.walletAddress) {
+        walletAddress = company.walletAddress;
+      }
+    }
+
+    if (!walletAddress) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+      });
+    }
+
+    const privateKey = await getPrivateKeyForWalletAddress(
+      req.user.id,
+      walletAddress,
+    );
+
+    const signer = new ethers.Wallet(privateKey, provider);
+    const contractWithSigner = ideaCoinContract.connect(signer);
+
+    const decimals = await ideaCoinContract.decimals();
+
+    const amountInUnits = ethers.utils.parseUnits(amount.toString(), decimals);
+
+    const balance = await ideaCoinContract.balanceOf(walletAddress);
+    if (balance.lt(amountInUnits)) {
+      console.error('[sendRoyaltyCoin] Insufficient balance', {
+        walletAddress,
+        balance: balance.toString(),
+        required: amountInUnits.toString(),
+        decimals,
+      });
+
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: ERRORS.INSUFFICIENT_BALANCE,
+      });
+    }
+
+    const tx = await contractWithSigner.transfer(to, amountInUnits);
+
+    const receipt = await tx.wait();
+
+    const transactionHash =
+      receipt.transactionHash || receipt.hash || receipt.transaction?.hash;
+    const blockNumber = receipt.blockNumber
+      ? typeof receipt.blockNumber === 'object' && receipt.blockNumber.toString
+        ? receipt.blockNumber.toString()
+        : String(receipt.blockNumber)
+      : null;
+
+    return res.json({
+      success: true,
+      transactionHash: transactionHash,
+      blockNumber: blockNumber,
+      message: COMMON.TRANSACTION_SUCCESS,
+    });
+  } catch (error) {
+    console.error('[sendRoyaltyCoin] Error:', error);
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+      success: false,
+      message: `${ERRORS.SEND_ROYALTY_COIN_FAILED}: ${error.message}`,
+    });
+  }
+};
+
 module.exports = blockchainController;
 
 nodeCron.schedule('*/5 * * * *', () => {
-  console.log('Running monitorMaticBalance every 5 minutes');
-  blockchainController.monitorMaticBalance();
+  console.log('Running monitorEthBalance every 5 minutes');
+  blockchainController.monitorEthBalance();
+});
+
+nodeCron.schedule('0 0 * * *', async () => {
+  console.log('Running daily ETH reward distribution job...');
+  try {
+    const pendingRewards = await mongoose
+      .model(MODALS.REWARD_DISTRIBUTION_HISTORY)
+      .find({ status: PAY_STATUS.PENDING })
+      .populate({ path: COMMON.USER, model: MODALS.PROFILE });
+
+    if (pendingRewards?.length === 0) {
+      console.log('No pending rewards found.');
+      return;
+    }
+
+    for (const reward of pendingRewards) {
+      const jobData = {
+        type: 'crowdfunding',
+        rewardId: reward?._id ?? reward?.id,
+        userId: reward?.user?.id ?? reward?.user?._id,
+        walletAddress: reward?.user?.walletAddress,
+        share: reward?.share,
+      };
+      queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, jobData);
+    }
+  } catch (err) {
+    console.log('ETH reward distribution job failed:', err);
+  }
 });
