@@ -66,6 +66,137 @@ const {
   NFT_CONTRACT_ADDRESS: nftContractAddress,
 } = process.env;
 
+async function getOwnerProfileIdForWallet(
+  targetWalletAddress,
+  defaultProfileId,
+) {
+  if (typeof targetWalletAddress !== 'string' || !targetWalletAddress) {
+    return defaultProfileId;
+  }
+
+  const walletRegex = new RegExp(`^${targetWalletAddress}$`, 'iu');
+
+  try {
+    const TagModel = mongoose.model(MODALS.TAG);
+
+    const company = await TagModel.findOne({
+      walletAddress: { $regex: walletRegex },
+    });
+
+    if (company && company.owner) {
+      return company.owner;
+    }
+  } catch (error) {
+    console.error(
+      '[getOwnerProfileIdForWallet] Failed to resolve owner profile:',
+      {
+        error: error?.message || error,
+        targetWalletAddress,
+      },
+    );
+  }
+
+  return defaultProfileId;
+}
+
+/**
+ * When the buyer is owner or employee of a company (Tag),
+ * returns that Tag's _id so the invention can also show
+ * in the community Inventions tab.
+ */
+async function isCommunityEmployee(profileId) {
+  if (!profileId) return null;
+  try {
+    const TagModel = mongoose.model(MODALS.TAG);
+    const tag = await TagModel.findOne({
+      $or: [{ owner: profileId }, { employees: { $in: [profileId] } }],
+    })
+      .select('_id')
+      .lean();
+    return tag?._id ?? null;
+  } catch (error) {
+    console.error(
+      '[isCommunityEmployee] Failed to resolve tag for profile:',
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+async function finalizeAuctionSettlement({
+  auctionData,
+  ownerProfileId,
+  walletAddressForRewards,
+  eventType,
+  txFrom,
+  txTo,
+  txHash,
+}) {
+  const tokenId = Number(auctionData.tokenId.toString());
+  const nft = await NFT.findOne({ tokenId: tokenId.toString() });
+
+  if (!nft) {
+    throw new Error(ERRORS.NFT_NOT_FOUND);
+  }
+
+  const tagId = await isCommunityEmployee(ownerProfileId);
+
+  const owner = tagId ? null : ownerProfileId;
+  const companyIdForNft = tagId ? tagId : null;
+
+  const updatedData = {
+    isListed: false,
+    onAuction: false,
+    maticPrice: null,
+    usdPrice: null,
+    owner,
+    company: companyIdForNft,
+    expiryDate: null,
+    auctionStartTime: null,
+    event: eventType,
+  };
+
+  await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+  const activityData = {
+    nft: nft._id,
+    from: txFrom,
+    to: txTo,
+    event: eventType,
+    price: null,
+    txHash,
+  };
+
+  await NftActivity.create(activityData);
+
+  const bidCount = await mongoose
+    .model(MODALS.BID)
+    .countDocuments({ tokenId: nft._id });
+  if (bidCount >= 1) {
+    await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
+  }
+
+  if (nft.invention) {
+    const Application = mongoose.model(MODALS.APPLICATION);
+    const inventionDoc = await Application.findOne({ _id: nft.invention });
+    if (inventionDoc) {
+      if (!inventionDoc.createdBy) {
+        inventionDoc.createdBy = inventionDoc.owner;
+      }
+      if (tagId) {
+        inventionDoc.company = tagId;
+        inventionDoc.owner = null;
+      } else {
+        inventionDoc.company = null;
+        inventionDoc.owner = ownerProfileId;
+      }
+      await inventionDoc.save();
+    }
+  }
+
+  await blockchainController.distributeIdeaRewards(walletAddressForRewards, 2);
+}
+
 async function _getEligibleAddresses() {
   const users = await mongoose.model(MODALS.PROFILE).find({
     walletAddress: {
@@ -710,6 +841,18 @@ const blockchainController = {
         signer,
       );
 
+      let ownerProfileId = req.user.id || req.user._id;
+      const userWalletLower = (req.user.walletAddress || '').toLowerCase();
+      const targetWalletLower = targetWalletAddress.toLowerCase();
+
+      if (targetWalletLower !== userWalletLower) {
+        ownerProfileId = await getOwnerProfileIdForWallet(
+          targetWalletAddress,
+          ownerProfileId,
+        );
+      }
+      const tagId = await isCommunityEmployee(ownerProfileId);
+
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
 
@@ -717,15 +860,41 @@ const blockchainController = {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
+      const owner = tagId ? null : ownerProfileId;
+      const companyIdForNft = tagId ? tagId : null;
+
       const updatedData = {
-        owner: req.user.id,
+        owner,
+        company: companyIdForNft,
         isListed: false,
+        onAuction: false,
         maticPrice: null,
         usdPrice: null,
+        expiryDate: null,
+        auctionStartTime: null,
         event: NFT_EVENTS.BUY,
       };
 
       await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
+
+      // ********************** Application (invention) ownership **************************
+      if (nft.invention) {
+        const Application = mongoose.model(MODALS.APPLICATION);
+        const inventionDoc = await Application.findOne({ _id: nft.invention });
+        if (inventionDoc) {
+          if (!inventionDoc.createdBy) {
+            inventionDoc.createdBy = inventionDoc.owner;
+          }
+          if (tagId) {
+            inventionDoc.company = tagId;
+            inventionDoc.owner = null;
+          } else {
+            inventionDoc.company = null;
+            inventionDoc.owner = ownerProfileId;
+          }
+          await inventionDoc.save();
+        }
+      }
 
       // Convert priceOfNft to BigNumber
       let priceOfNftBigNumber;
@@ -753,17 +922,6 @@ const blockchainController = {
       const receipt = await buyTx.wait();
 
       const { transactionHash, from, to } = receipt;
-
-      // ************************ Application Table update **************************
-      if (nft.invention) {
-        await mongoose
-          .model(MODALS.APPLICATION)
-          .findOneAndUpdate(
-            { _id: nft.invention },
-            { owner: req.user.id },
-            { upsert: false },
-          );
-      }
 
       // ********************** nftActivity Table update *******************
       let priceInMatic;
@@ -1415,65 +1573,30 @@ const blockchainController = {
 
       const { transactionHash, from, to } = receipt;
 
-      // ********************** Update NFT Table **************************
-      const nft = await NFT.findOne({ tokenId: tokenId.toString() });
+      const highestBidderAddress = auctionData.currentBidder.toLowerCase();
+      const ownerProfileId = await getOwnerProfileIdForWallet(
+        highestBidderAddress,
+        bidOwnerId || req.user.id || req.user._id,
+      );
 
-      if (!nft) {
-        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
-      }
-
-      const updatedData = {
-        isListed: false,
-        onAuction: false,
-        maticPrice: null,
-        usdPrice: null,
-        owner: bidOwnerId,
-        expiryDate: null,
-        auctionStartTime: null,
-        event: NFT_EVENTS.ACCEPT,
-      };
-
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
-
-      // ********************** nftActivity Table update *******************
-      const activityData = {
-        nft: nft._id,
-        from: from,
-        to: to,
-        event: NFT_EVENTS.ACCEPT,
-        price: null,
-        txHash: transactionHash,
-      };
-
-      await NftActivity.create(activityData);
-
-      // ********************** BID Table update **************************
-      const bidCount = await mongoose
-        .model(MODALS.BID)
-        .countDocuments({ tokenId: nft._id });
-      if (bidCount >= 1) {
-        await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
-      }
-
-      // ********************** APPLICATION Table update **************************
-      if (nft.invention) {
-        await mongoose
-          .model(MODALS.APPLICATION)
-          .findOneAndUpdate(
-            { _id: nft.invention },
-            { owner: bidOwnerId },
-            { upsert: false },
-          );
-      }
       const user = await mongoose.model(MODALS.PROFILE).findOne({
-        _id: bidOwnerId,
+        _id: ownerProfileId,
         walletAddress: {
           $ne: '',
           $exists: true,
           $type: 'string',
         },
       });
-      await blockchainController.distributeIdeaRewards(user?.walletAddress, 2);
+
+      await finalizeAuctionSettlement({
+        auctionData,
+        ownerProfileId,
+        walletAddressForRewards: user?.walletAddress,
+        eventType: NFT_EVENTS.ACCEPT,
+        txFrom: from,
+        txTo: to,
+        txHash: transactionHash,
+      });
       return res.json({
         success: true,
         message: COMMON.NFT_ACCEPT_OFFER_SUCCESS,
@@ -1527,61 +1650,26 @@ const blockchainController = {
 
       const { transactionHash, from, to } = receipt;
 
-      // ********************** Update NFT Table **************************
-      const tokenId = Number(auctionData.tokenId.toString());
-      const nft = await NFT.findOne({ tokenId: tokenId.toString() });
+      let ownerProfileId = req.user.id || req.user._id;
+      const userWalletLower = (req.user.walletAddress || '').toLowerCase();
+      const targetWalletLower = walletAddress.toLowerCase();
 
-      if (!nft) {
-        return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
+      if (targetWalletLower !== userWalletLower) {
+        ownerProfileId = await getOwnerProfileIdForWallet(
+          walletAddress,
+          ownerProfileId,
+        );
       }
 
-      const updatedData = {
-        isListed: false,
-        onAuction: false,
-        maticPrice: null,
-        usdPrice: null,
-        owner: req.user.id,
-        expiryDate: null,
-        auctionStartTime: null,
-        event: NFT_EVENTS.CLAIM,
-      };
-
-      await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
-
-      // ********************** nftActivity Table update *******************
-      const activityData = {
-        nft: nft._id,
-        from: from,
-        to: to,
-        event: NFT_EVENTS.CLAIM,
-        price: null,
+      await finalizeAuctionSettlement({
+        auctionData,
+        ownerProfileId,
+        walletAddressForRewards: walletAddress,
+        eventType: NFT_EVENTS.CLAIM,
+        txFrom: from,
+        txTo: to,
         txHash: transactionHash,
-      };
-
-      await NftActivity.create(activityData);
-
-      // ********************** BID Table update **************************
-      const bidCount = await mongoose
-        .model(MODALS.BID)
-        .countDocuments({ tokenId: nft._id });
-      if (bidCount >= 1) {
-        await mongoose.model(MODALS.BID).deleteMany({ tokenId: nft._id });
-      }
-
-      // ********************** APPLICATION Table update **************************
-      if (nft.invention) {
-        await mongoose
-          .model(MODALS.APPLICATION)
-          .findOneAndUpdate(
-            { _id: nft.invention },
-            { owner: req.user.id },
-            { upsert: false },
-          );
-      }
-      await blockchainController.distributeIdeaRewards(
-        req.user.walletAddress,
-        2,
-      );
+      });
 
       return res.json({
         success: true,
