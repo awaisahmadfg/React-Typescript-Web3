@@ -40,11 +40,22 @@ import { localReducer } from './nftDetailState/reducer';
 import { getInitialState } from '../nftListForSale/NftDetailsSection/utils';
 import { setCookie } from 'helpers/common';
 
+function getBackNav(from: string | string[] | undefined) {
+  const isMarketplace = from === 'marketplace';
+  return {
+    backTab: isMarketplace ? 'marketplace' : 'my-collections',
+    backLabel: isMarketplace
+      ? Constants.C_MARKETPLACE
+      : Constants.MY_COLLECTIONS
+  };
+}
+
 export const NftDetails = () => {
   const router = useRouter();
   const dispatch = useDispatch();
   const openTransakBuyModal = GetOpenTransakBuyModalObj();
-  const { id, referralCode } = router.query;
+  const { id, referralCode, from } = router.query;
+  const { backTab, backLabel } = getBackNav(from);
   const getNftLoader = GetNftLoader();
   const nft = GetNft();
   const user = GetUser();
@@ -76,8 +87,8 @@ export const NftDetails = () => {
   }, [dispatch]);
 
   const handleBackClick = useCallback(() => {
-    router.push('/marketplace?tab=my-collections');
-  }, [router]);
+    router.push(`/marketplace?tab=${backTab}`);
+  }, [router, backTab]);
 
   if (!nft || getNftLoader) {
     return (
@@ -117,7 +128,7 @@ export const NftDetails = () => {
             fontWeight: 500
           }}
         >
-          Back to My Patent Tokens
+          Back to {backLabel}
         </Box>
       </Box>
       <Container>
@@ -151,7 +162,7 @@ export const NftDetails = () => {
           buttonText={Constants.VIEW_NFT_TEXT}
           onButtonClick={() => {
             handleCloseBuyModal();
-            router.push('/marketplace?tab=my-collections');
+            router.push(`/marketplace?tab=${backTab}`);
           }}
         />
       )}
