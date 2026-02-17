@@ -8,6 +8,7 @@ import auth, { AuthProvider } from './authProvider';
 import { FetchUtils } from './fetchUtils';
 import { Item as TreeItem, flatList } from './helpers';
 import { CreditsHistory } from './interface/common';
+import { GlobalSearchResponse } from './redux-state/commons/interface';
 import {
   Constants,
   END_POINTS,
@@ -95,6 +96,7 @@ export interface GetListParams {
   itemType?: string;
   pagination?: PaginationPayload;
   sort?: SortPayload;
+  search?: string | null;
 }
 
 export interface GetListResult<RecordType = PsRecord> {
@@ -161,6 +163,11 @@ export interface GetManyResult<RecordType = PsRecord> {
 export interface GetOneParams {
   id: Identifier;
 }
+
+export interface GetOneFilterParams {
+  key: any;
+  value: any;
+}
 export interface GetOneByKeyParams {
   key: string;
   pagination?: {
@@ -218,7 +225,7 @@ export interface DeleteResult<RecordType = PsRecord> {
 const prepareQueryString = (
   params: Partial<GetListParams>
 ): Record<string, string> => {
-  const { page = 1, perPage = 10 } = params.pagination || {};
+  const { page = 0, perPage = 10 } = params.pagination || {};
   const { field = 'createdAt', order = 'ASC' } = params.sort || {};
   let rangeStart, rangeEnd;
   if (
@@ -232,13 +239,14 @@ const prepareQueryString = (
     rangeStart = (page as number) * (perPage as number);
     rangeEnd = ((page as number) + 1) * (perPage as number) - 1;
   } else {
-    rangeStart = ((page as number) - 1) * (perPage as number);
-    rangeEnd = (page as number) * (perPage as number) - 1;
+    rangeStart = (page as number) * (perPage as number);
+    rangeEnd = ((page as number) + 1) * (perPage as number) - 1;
   }
   const query = {
     sort: JSON.stringify([field, order]),
     range: JSON.stringify([rangeStart, rangeEnd]),
-    filter: JSON.stringify(params.filter)
+    filter: JSON.stringify(params.filter),
+    search: JSON.stringify(params?.search)
   };
   return query;
 };
@@ -313,6 +321,7 @@ export class DataProvider implements DataProviderI {
       url: string;
       options?: RequestInit;
       throwError?: boolean;
+      suppressToast?: boolean;
     },
     isFormData?: boolean
   ): Promise<any> {
@@ -339,19 +348,25 @@ export class DataProvider implements DataProviderI {
       );
 
       const errorMsg =
-        error.status == 500 ? ERRORS.UNEXPECTED_ERROR : error.message;
+        error.status == 500
+          ? ERRORS.UNEXPECTED_ERROR
+          : error.status == 401
+            ? ERRORS.UNAUTHORIZED_PLEASE_LOGIN
+            : error.message;
 
       const isUnauthorized = error.status == 401;
       if (isUnauthorized) {
         removeToken();
       }
       if (isUnauthorized || request.throwError) {
-        toastify(
-          errorMsg,
-          VARIANT.ERROR,
-          VARIANT.TOP_CENTER,
-          TOASTIFY_DURATION
-        );
+        if (!request.suppressToast) {
+          toastify(
+            errorMsg,
+            VARIANT.ERROR,
+            VARIANT.TOP_LEFT,
+            TOASTIFY_DURATION
+          );
+        }
         throw newError;
       }
     }
@@ -401,86 +416,68 @@ export class DataProvider implements DataProviderI {
     };
   }
 
-  async inviteNewUser(payload: any) {
-    try {
-      const { nftInvitation, inventionId, inventionName, ...rest } = payload;
-      const jwtToken = await this.auth.getJwtToken();
-      const response = await fetch(
-        `${API_URL}/auth${PATH_NAMES.ADMIN_INVITE}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${jwtToken}`
-          },
-          body: JSON.stringify({ payload: rest })
-        }
-      );
-      const newProfile: any = await response.json();
+  // async inviteNewUser(payload: any) {
+  //   try {
+  //     const { nftInvitation, inventionId, inventionName, ...rest } = payload;
+  //     const jwtToken = await this.auth.getJwtToken();
+  //     const response = await fetch(
+  //       `${API_URL}/auth${PATH_NAMES.ADMIN_INVITE}`,
+  //       {
+  //         method: 'POST',
+  //         headers: {
+  //           'Content-Type': 'application/json',
+  //           Authorization: `Bearer ${jwtToken}`
+  //         },
+  //         body: JSON.stringify({ payload: rest })
+  //       }
+  //     );
+  //     return { response };
+  //   } catch (error) {
+  //     console.error(ERRORS.INVITE_USER_ERROR, error);
+  //     throw new Error(ERRORS.ERROR_SENDING_INVITE);
+  //   }
+  // }
 
-      let newOpportunity: any = {};
-      let newInventionOpportunity = {};
+  async inviteInfluencers<T>(payload: any) {
+    const request = {
+      url: `${API_URL}/influencers/invite`,
+      options: {
+        body: JSON.stringify(payload),
+        method: 'POST'
+      },
+      throwError: true
+    };
 
-      if (newProfile && nftInvitation) {
-        const createOpportunity = async (payload) => {
-          const { contactId, contactName, inventionName } = payload;
-          const url = 'https://services.leadconnectorhq.com/opportunities/';
-          const method = 'POST';
-          const data = {
-            pipelineId: 'drAGRmZoG9soulqUwuDj',
-            locationId: 'eU79bySeXP9RYLi7Yv49',
-            name: contactName,
-            pipelineStageId: '8c7c2ec0-f7a3-4e3e-aed8-a6f63122b235',
-            status: 'open',
-            contactId: contactId,
-            customFields: [
-              {
-                id: 'LuR5ik5KMX2KEmmeJNJD',
-                key: 'opportunity.invention_name',
-                field_value: inventionName
-              }
-            ]
-          };
+    const data = await this.makeRequest(request);
+    return data;
+  }
 
-          const apiCall = await fetch(url, {
-            method: method,
-            headers: {
-              Authorization: `Bearer pit-f494bbb6-9957-4c6b-a52e-4deae143d8db`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              Version: '2021-07-28'
-            },
-            body: JSON.stringify(data)
-          });
+  async inviteLeader<T>(payload: any): Promise<T> {
+    const request = {
+      url: `${API_URL}/tags/inviteLeader`,
+      options: {
+        body: JSON.stringify(payload),
+        method: 'POST'
+      },
+      throwError: true
+    };
 
-          return apiCall.json();
-        };
-        newOpportunity = await createOpportunity({
-          contactId: newProfile.contactId,
-          contactName: newProfile.username,
-          inventionName: inventionName
-        });
-        const request = {
-          url: `${API_URL}/inventionOpportunity`,
-          options: {
-            method: 'POST',
-            body: JSON.stringify({
-              ghlContactId: newProfile.contactId,
-              profileId: newProfile.id,
-              opportunityId: newOpportunity.opportunity.id,
-              inventionId,
-              status: 'stage1'
-            })
-          }
-        };
-        newInventionOpportunity = await this.makeRequest(request);
-      }
+    const data = await this.makeRequest(request);
+    return data;
+  }
 
-      return { newProfile, newOpportunity, newInventionOpportunity };
-    } catch (error) {
-      console.error(ERRORS.INVITE_USER_ERROR, error);
-      throw new Error(ERRORS.ERROR_SENDING_INVITE);
-    }
+  async getMetricsForCommunityLeader(communityKey: string): Promise<{
+    activeConcepts: number;
+    solutionsThisWeek: number;
+    unclaimedPatents: number;
+    followers: any;
+  }> {
+    const request = {
+      url: `${API_URL}/tags/communityLeaderMetrics/${communityKey}`
+    };
+
+    const data = await this.makeRequest(request);
+    return data;
   }
 
   async checkImprovedProgress(conceptId): Promise<any> {
@@ -512,11 +509,86 @@ export class DataProvider implements DataProviderI {
     };
   }
 
+  async checkContestProblem(id: string | number) {
+    const request = {
+      url: `${API_URL}/${RESOURCE.CONTESTS}${END_POINTS.CHECK_CONTEST_PROBLEM}/${id}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async checkConceptSolution(id: string | number) {
+    const request = {
+      url: `${API_URL}/${RESOURCE.CONTESTS}${END_POINTS.CHECK_CONCEPT_SOLUTION}/${id}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getDocumentIndex<T>(
+    resource: string,
+    params: {
+      filter: object;
+      sort: object;
+      id: string;
+    }
+  ) {
+    const paramString = createParamString(params);
+    const request = {
+      url: `${API_URL}/${resource}${END_POINTS.GET_DOC_INDEX}/?${paramString}`
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
   async getOne<T>(resource: string, params: GetOneParams) {
     const resourceName = this.getResourceName(resource);
-    const request = { url: `${API_URL}/${resourceName}/${params.id}` };
+    const request = { url: `${API_URL}/${resourceName}/getOne/${params.id}` };
     const data = await this.makeRequest(request);
     return { data };
+  }
+
+  async getOneByFilter<T>(resource: string, params: GetOneFilterParams) {
+    const resourceName = this.getResourceName(resource);
+    const request = {
+      url: `${API_URL}/${resourceName}/getOneByFilter?key=${params.key}&value=${params.value}`
+    };
+    const data = await this.makeRequest(request);
+    return { data };
+  }
+
+  async createCampaign<T>(
+    resource: string,
+    itemId: object,
+    influencerId: string | number
+  ) {
+    const request = {
+      url: `${API_URL}/${resource}`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({
+          itemId,
+          influencerId
+        })
+      }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getOneCampaign<T>(
+    resource: string,
+    itemId: string | number,
+    influencerId: string | number
+  ) {
+    const resourceName = this.getResourceName(resource);
+    const request = {
+      url: `${API_URL}/${resourceName}/getOneCampaign?itemId=${itemId}&influencerId=${influencerId}`
+    };
+    const data = await this.makeRequest(request);
+    return data;
   }
 
   async getOneByKey<T>(
@@ -529,6 +601,47 @@ export class DataProvider implements DataProviderI {
       url: `${API_URL}/${resourceName}/b_k/${
         params.key
       }?${queryString.stringify(query)}`
+    };
+
+    const data = await this.makeRequest(request);
+    return { data };
+  }
+
+  async getOneByEmail<T>(resource: string, email: string) {
+    const request = {
+      url: `${API_URL}/${resource}/getOneByEmail/${email}`
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async getProfileByEmail<T>(email: string) {
+    const request = {
+      url: `${API_URL}/${RESOURCE.PROFILES}/getOneByEmail/${email}`
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async getMyPrivateKey(): Promise<{ privateKey: string | null }> {
+    const request = {
+      url: `${API_URL}/${RESOURCE.PROFILES}/me/private-key`
+    };
+    try {
+      const data = await this.makeRequest(request);
+      return { privateKey: data?.privateKey ?? null };
+    } catch {
+      return { privateKey: null };
+    }
+  }
+
+  async getOneByProductTitle<T>(
+    resource: string,
+    params: { title: string }
+  ): Promise<GetOneResult<T>> {
+    const resourceName = this.getResourceName(resource);
+    const request = {
+      url: `${API_URL}/${resourceName}/getonebytitle?title=${params.title}`
     };
 
     const data = await this.makeRequest(request);
@@ -554,19 +667,17 @@ export class DataProvider implements DataProviderI {
 
   async getMany<T>(
     resource: string,
-    params: GetManyParams
+    params: object
   ): Promise<GetManyResult<T>> {
     const resourceName = this.getResourceName(resource);
-    const query = {
-      filter: JSON.stringify({ id: params.ids })
-    };
+    const paramString = createParamString(params);
     const request = {
-      url: `${API_URL}/${resourceName}?${queryString.stringify(query)}`
+      url: `${API_URL}/${resourceName}?${paramString}`
     };
-    const data = await this.makeRequest(request);
+    const res = await this.makeRequest(request);
     return {
-      data: data.data,
-      total: data.total
+      data: res.data,
+      total: res.total
     };
   }
 
@@ -594,9 +705,18 @@ export class DataProvider implements DataProviderI {
     return { data: res };
   }
 
+  async getAllInfluencers(): Promise<any> {
+    const request = {
+      url: `${API_URL}/dashboard/getInfluencers`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return { data: res };
+  }
+
   async createComponent(data): Promise<any> {
     const request = {
-      url: `${API_URL}${END_POINTS.CREATE_COMPONENT}`,
+      url: `${API_URL}/${RESOURCE.COMPONENTS}${END_POINTS.CREATE_COMPONENT}`,
       options: { method: 'POST', body: JSON.stringify(data) }
     };
     const res = await this.makeRequest(request);
@@ -616,7 +736,7 @@ export class DataProvider implements DataProviderI {
     const resourceName = this.getResourceName(resource);
     const query = prepareQueryString(params);
     const request = {
-      url: `${API_URL}/${resourceName}/${params.key}/${
+      url: `${API_URL}/${resourceName}/${params.key}/relatedItem/${
         params.item
       }?${queryString.stringify(query)}`
     };
@@ -638,29 +758,84 @@ export class DataProvider implements DataProviderI {
     const data = await this.makeRequest(request);
     return { data };
   }
-  async processVideoExample(resource: string, id) {
-    try {
-      const resourceName = this.getResourceName(resource);
-      const query = {
-        filter: JSON.stringify({ id: id })
-      };
-      const request = {
-        url: `${API_URL}/${resourceName}/getVideo?${queryString.stringify(
-          query
-        )}`,
-        throwError: true
-      };
-      const res = await this.makeRequest(request);
-      return res;
-    } catch (error) {
-      console.error('Error processing video:', error);
-      throw error;
+
+  async processVideoExample(resource: string, id, type, audioBlob) {
+    const resourceName = this.getResourceName(resource);
+
+    const formData = new FormData();
+    formData.append('id', id);
+    formData.append('itemType', type);
+    {
+      audioBlob && formData.append('audioBlob', audioBlob, 'audio.wav');
     }
+
+    const request = {
+      url: `${API_URL}/${resourceName}/getVideo`,
+      options: {
+        method: 'POST',
+        body: formData
+      },
+      throwError: true
+    };
+
+    const res = await this.makeRequest(request, true);
+    return res;
+  }
+
+  async processPromoVideoExample(resource: string, id, type, audioBlob, data) {
+    const resourceName = this.getResourceName(resource);
+
+    const formData = new FormData();
+    formData.append('id', id);
+    formData.append('itemType', type);
+    formData.append('data', JSON.stringify(data));
+    {
+      audioBlob && formData.append('audioBlob', audioBlob, 'audio.wav');
+    }
+
+    const request = {
+      url: `${API_URL}/${resourceName}/getPromoVideo`,
+      options: {
+        method: 'POST',
+        body: formData
+      },
+      throwError: true
+    };
+
+    const res = await this.makeRequest(request, true);
+    return res;
+  }
+
+  async shareVideoToYoutubechannel(data: any) {
+    const request = {
+      url: `${API_URL}/share/shareVideoToYoutubechannel`,
+      options: { method: 'POST', body: JSON.stringify(data) }
+    };
+    const res = await this.makeRequest(request);
+    return res;
   }
 
   async getOwnedCommunity(userId) {
     const request = {
       url: `${API_URL}/${RESOURCE.TAGS}${END_POINTS.GET_USER_OWNED_COMMUNITY}/${userId}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getFollowersRange() {
+    const request = {
+      url: `${API_URL}/${RESOURCE.TAGS}/getfollowersrange`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getIdeapointsRange() {
+    const request = {
+      url: `${API_URL}/${RESOURCE.TAGS}/getideapointsrange`,
       options: { method: 'GET' }
     };
     const res = await this.makeRequest(request);
@@ -700,7 +875,7 @@ export class DataProvider implements DataProviderI {
 
   async distributeReward<T>() {
     const request = {
-      url: `${API_URL}${PATH_NAMES.REWARDS}${END_POINTS.DISTRIBUTE_MATIC_REWARD}`,
+      url: `${API_URL}${PATH_NAMES.REWARDS}${END_POINTS.DISTRIBUTE_ETH_REWARD}`,
       options: { method: 'PUT' }
     };
     const data = await this.makeRequest(request);
@@ -716,15 +891,12 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async nftApproval<T>(tokenId: string) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.APPROVE_NFT}`
-    );
+  async nftApproval<T>(tokenId: string, walletAddress: string) {
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.APPROVE_NFT}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ tokenId })
+        body: JSON.stringify({ tokenId, walletAddress })
       },
       throwError: true
     };
@@ -732,15 +904,17 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async listFixedNft(tokenId: string, listPrice: BigNumber, usdPrice: number) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.LIST_FIXED_NFT}`
-    );
+  async listFixedNft(
+    tokenId: string,
+    listPrice: BigNumber,
+    usdPrice: number,
+    walletAddress: string
+  ) {
     const request = {
       url: `${API_URL}/${PATH_NAMES.MARKETPLACE}${END_POINTS.LIST_FIXED_NFT}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ tokenId, listPrice, usdPrice })
+        body: JSON.stringify({ tokenId, listPrice, usdPrice, walletAddress })
       },
       throwError: true
     };
@@ -749,9 +923,6 @@ export class DataProvider implements DataProviderI {
   }
 
   async cancelFixedNft(tokenId: string, priceOfNft: object) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CANCEL_FIXED_NFT}`
-    );
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CANCEL_FIXED_NFT}`,
       options: {
@@ -764,15 +935,16 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async buyFixedNft(tokenId: string, priceOfNft: object) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.BUY_FIXED_NFT}`
-    );
+  async buyFixedNft(
+    tokenId: string,
+    priceOfNft: object,
+    walletAddress: string
+  ) {
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.BUY_FIXED_NFT}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ tokenId, priceOfNft })
+        body: JSON.stringify({ tokenId, priceOfNft, walletAddress })
       },
       throwError: true
     };
@@ -785,11 +957,9 @@ export class DataProvider implements DataProviderI {
     auctionStartTime: BigNumber,
     auctionEndTime: BigNumber,
     tokenId: string,
-    usdPrice: number
+    usdPrice: number,
+    walletAddress: string
   ) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.LIST_AUCTION_NFT}`
-    );
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.LIST_AUCTION_NFT}`,
       options: {
@@ -799,10 +969,12 @@ export class DataProvider implements DataProviderI {
           auctionStartTime: auctionStartTime.toString(),
           auctionEndTime: auctionEndTime.toString(),
           tokenId,
-          usdPrice
+          usdPrice,
+          walletAddress
         })
       },
-      throwError: true
+      throwError: true,
+      suppressToast: true
     };
 
     const data = await this.makeRequest(request);
@@ -810,9 +982,6 @@ export class DataProvider implements DataProviderI {
   }
 
   async cancelAuctionNft(tokenId: string, priceOfNft: object) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CANCEL_AUCTION_NFT}`
-    );
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CANCEL_AUCTION_NFT}`,
       options: {
@@ -826,32 +995,36 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async bidOnNft(auctionId: string, bidAmount: string, usdPrice: number ) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.BID_NFT}`
-    );
+  async bidOnNft(
+    auctionId: string,
+    bidAmount: string,
+    usdPrice: number,
+    walletAddress: string
+  ) {
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.BID_NFT}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ auctionId, bidAmount, usdPrice })
+        body: JSON.stringify({ auctionId, bidAmount, usdPrice, walletAddress })
       },
-      throwError: true
+      throwError: true,
+      suppressToast: true // Suppress toast in makeRequest, saga will show the proper error message
     };
 
     const data = await this.makeRequest(request);
     return { data };
   }
 
-  async acceptOffer(auctionId: string, bidOwnerId: string) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.ACCEPT_OFFER}`
-    );
+  async acceptOffer(
+    auctionId: string,
+    bidOwnerId: string,
+    walletAddress: string
+  ) {
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.ACCEPT_OFFER}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ auctionId, bidOwnerId })
+        body: JSON.stringify({ auctionId, bidOwnerId, walletAddress })
       },
       throwError: true
     };
@@ -860,15 +1033,12 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async claimNft(auctionId: string) {
-    console.log(
-      `Making request to: ${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CLAIM_NFT}`
-    );
+  async claimNft(auctionId: string, walletAddress: string) {
     const request = {
       url: `${API_URL}${PATH_NAMES.MARKETPLACE}${END_POINTS.CLAIM_NFT}`,
       options: {
         method: 'POST',
-        body: JSON.stringify({ auctionId })
+        body: JSON.stringify({ auctionId, walletAddress })
       },
       throwError: true
     };
@@ -879,7 +1049,8 @@ export class DataProvider implements DataProviderI {
 
   async create<T>(
     resource: string,
-    params: CreateParams
+    params: CreateParams,
+    options?: { suppressToast?: boolean }
   ): Promise<CreateResult<T>> {
     const resourceName = this.getResourceName(resource);
     const isFormData = params.data instanceof FormData;
@@ -894,7 +1065,8 @@ export class DataProvider implements DataProviderI {
         body: isFormData ? params?.data : JSON.stringify(params.data),
         method: 'POST'
       },
-      throwError: true
+      throwError: true,
+      suppressToast: options?.suppressToast
     };
 
     const data = await this.makeRequest(request, isFormData);
@@ -969,7 +1141,8 @@ export class DataProvider implements DataProviderI {
     const request = {
       url: `${API_URL}/${RESOURCE.AUTH}${END_POINTS.FORGET_PASSWORD}`,
       options: { method: 'POST', body: JSON.stringify(data) },
-      throwError: true
+      throwError: true,
+      suppressToast: true
     };
     const res = await this.makeRequest(request);
     return { data: res };
@@ -1085,6 +1258,21 @@ export class DataProvider implements DataProviderI {
     };
   }
 
+  async getContestActivities<T>(
+    contestId: string | number,
+    limit?: number
+  ): Promise<GetListResult<T>> {
+    const limitParam = limit ? `?limit=${limit}` : '';
+    const request = {
+      url: `${API_URL}/activities/contest/${contestId}${limitParam}`
+    };
+    const data = await this.makeRequest(request);
+    return {
+      data: data.data || [],
+      total: data.total || 0
+    };
+  }
+
   async fetchScrappedProfiles(payload: any) {
     try {
       const { companyIds, type = Constants.LINKEDIN } = payload;
@@ -1095,8 +1283,8 @@ export class DataProvider implements DataProviderI {
       const request = {
         url:
           type === Constants.LINKEDIN
-            ? `${API_URL}/contacts/fetchLinkedInScrappedContacts?mindMinerCompanyIds=${companyIdsParam}&type=${type}`
-            : `${API_URL}/contacts/fetchYouTubeScrappedContacts?mindMinerCompanyIds=${companyIdsParam}&type=${type}`,
+            ? `${API_URL}/influencers/fetchLinkedInScrappedInfluencersInfo?mindMinerCompanyIds=${companyIdsParam}&type=${type}`
+            : `${API_URL}/influencers/fetchYouTubeScrappedInfluencersInfo?mindMinerCompanyIds=${companyIdsParam}&type=${type}`,
         options: { method: 'GET' },
         throwError: true
       };
@@ -1148,7 +1336,7 @@ export class DataProvider implements DataProviderI {
       };
       const result = await this.makeRequest(request);
       const save = {
-        url: `${API_URL}/contacts/updateContacts`,
+        url: `${API_URL}/influencers/updateInfluencersInfo`,
         options: {
           method: 'POST',
           body: JSON.stringify(result)
@@ -1177,7 +1365,7 @@ export class DataProvider implements DataProviderI {
         return;
       }
       const request = {
-        url: `${API_URL}/contacts/youtubeScrapper?query=${encodeURIComponent(query)}&mindMinerCompanyId=${mindMinerCompanyId}&maxResults=${maxResults}`,
+        url: `${API_URL}/influencers/youtubeScrapper?query=${encodeURIComponent(query)}&mindMinerCompanyId=${mindMinerCompanyId}&maxResults=${maxResults}`,
         options: {
           method: 'GET'
         },
@@ -1185,7 +1373,7 @@ export class DataProvider implements DataProviderI {
       };
       const result = await this.makeRequest(request);
       const save = {
-        url: `${API_URL}/contacts/updateContacts`,
+        url: `${API_URL}/influencers/updateInfluencersInfo`,
         options: {
           method: 'POST',
           body: JSON.stringify(result)
@@ -1258,51 +1446,22 @@ export class DataProvider implements DataProviderI {
     return { data };
   }
 
-  async getManufacturers<T>(): Promise<GetListResult> {
+  async getManufacturers<T>(params): Promise<GetListResult> {
+    const paramString = createParamString(params);
     const request = {
-      url: `${API_URL}/manufacturerCompany`
+      url: `${API_URL}/manufacturerCompany?${paramString}`
     };
     const data = await this.makeRequest(request);
     return { data: data, total: data?.length };
   }
 
-  async getInventionsOpenToQuote<T>(
-    id: string,
-    pagination: { page: number; perPage: number }
-  ): Promise<GetListResult> {
-    const paginationQuery = pagination
-      ? `&page=${pagination.page}&perPage=${pagination.perPage}`
-      : '';
+  async getManufacturersWithQuotation<T>(params) {
+    const paramString = createParamString(params);
     const request = {
-      url: `${API_URL}/applications/inventions/${id}?openToQuote=true${paginationQuery}`,
-      options: { method: 'GET' }
+      url: `${API_URL}/manufacturerCompany/getManufacturersWithQuotation?${paramString}`
     };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getInventionsOpenToQuoteCount<T>(id: string): Promise<GetListResult> {
-    const request = {
-      url: `${API_URL}/applications/inventionsCount/${id}?openToQuote=true`,
-      options: { method: 'GET' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getInventionsAcceptedByManufacturer<T>(
-    id: string,
-    pagination: { page: number; perPage: number }
-  ): Promise<GetListResult> {
-    const paginationQuery = pagination
-      ? `&page=${pagination.page}&perPage=${pagination.perPage}`
-      : '';
-    const request = {
-      url: `${API_URL}/applications/inventions/${id}?openToQuote=false${paginationQuery}`,
-      options: { method: 'GET' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
+    const data = await this.makeRequest(request);
+    return data;
   }
 
   async getBidOffers<T>(tokenId: string | number): Promise<GetListResult> {
@@ -1321,17 +1480,6 @@ export class DataProvider implements DataProviderI {
     const request = {
       url: `${API_URL}/${resource}?tokenId=${payload.tokenId}`,
       options: { method: 'DELETE' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getInventionsAcceptedByManufacturerCount<T>(
-    id: string
-  ): Promise<GetListResult> {
-    const request = {
-      url: `${API_URL}/applications/inventionsCount/${id}?openToQuote=false`,
-      options: { method: 'GET' }
     };
     const res = await this.makeRequest(request);
     return res;
@@ -1361,9 +1509,9 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
-  async updateInvention<T>(id, payload): Promise<T> {
+  async updateQuotationRequest<T>(id, payload): Promise<T> {
     const request = {
-      url: `${API_URL}/applications/updateInvention/${id}`,
+      url: `${API_URL}/quotationRequests/updateInvention/${id}`,
       options: { method: 'PUT', body: JSON.stringify(payload) }
     };
     const res = await this.makeRequest(request);
@@ -1398,58 +1546,6 @@ export class DataProvider implements DataProviderI {
         method: 'POST',
         body: JSON.stringify({ accountId, redirectUrl })
       }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getQuotationByInvention<T>(
-    id: string | number,
-    isQuotationView: boolean,
-    pagination?: { page: number; perPage: number } | null
-  ): Promise<any> {
-    const paginationQuery = pagination
-      ? `&page=${pagination.page}&perPage=${pagination.perPage}`
-      : '';
-    const request = {
-      url: `${API_URL}/quotations/getOneByInvention/${id}?isQuotationView=${isQuotationView}${paginationQuery}`,
-      options: { method: 'GET' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getQuotationByInventionCount<T>(
-    id: string | number,
-    isQuotationView: boolean
-  ): Promise<any> {
-    const request = {
-      url: `${API_URL}/quotations/getOneByInventionCount/${id}?isQuotationView=${isQuotationView}`,
-      options: { method: 'GET' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getQuotationByUserId<T>(
-    userId: string | number,
-    pagination: { page: number; perPage: number } | null
-  ): Promise<any> {
-    const paginationQuery = pagination
-      ? `&page=${pagination.page}&perPage=${pagination.perPage}`
-      : '';
-    const request = {
-      url: `${API_URL}/quotations/getOneByUserId/${userId}?${paginationQuery}`,
-      options: { method: 'GET' }
-    };
-    const res = await this.makeRequest(request);
-    return res;
-  }
-
-  async getQuotationByUserIdCount<T>(userId: string | number): Promise<any> {
-    const request = {
-      url: `${API_URL}/quotations/getOneByUserIdCount/${userId}`,
-      options: { method: 'GET' }
     };
     const res = await this.makeRequest(request);
     return res;
@@ -1796,6 +1892,15 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
+  async getInfluencers(itemId) {
+    const request = {
+      url: `${API_URL}/influencers/getInfluencers/${itemId}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
   async calculateMultiplierIdeaPoints(data: {
     defaultIdeaPoints: string;
     likes: number;
@@ -1867,6 +1972,150 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
+  async globalSearchEntities(
+    query: string,
+    page: number = 1,
+    limit: number = 10,
+    types?: string[]
+  ): Promise<GlobalSearchResponse> {
+    const params = new URLSearchParams();
+
+    if (page) {
+      params.append('page', String(page));
+    }
+    if (limit) {
+      params.append('limit', String(limit));
+    }
+    if (types && types.length) {
+      params.append('types', types.join(','));
+    }
+
+    const request = {
+      url: `${API_URL}/globalSearch${END_POINTS.GLOBAL_SEARCH}?query=${encodeURIComponent(
+        query
+      )}&${params.toString()}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async globalSearchGroupedInfluencer(
+    query: string,
+    page: number = 1,
+    limit?: number,
+    types?: string[]
+  ): Promise<any> {
+    const params = new URLSearchParams();
+    if (page) {
+      params.append('page', String(page));
+    }
+    if (limit) {
+      params.append('limit', String(limit));
+    }
+    if (types && types.length > 0) {
+      params.append('types', types.join(','));
+    }
+
+    const request = {
+      url: `${API_URL}/globalSearch/influencer/grouped?query=${encodeURIComponent(
+        query
+      )}&${params.toString()}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async globalSearchFindByType(
+    type: string,
+    page: number = 1,
+    limit: number = 10,
+    query?: string
+  ): Promise<any> {
+    const params = new URLSearchParams();
+    if (page) {
+      params.append('page', String(page));
+    }
+    if (limit) {
+      params.append('limit', String(limit));
+    }
+    // Request only the fields we actually need in the UI
+    params.append('fields', 'id,title,type,image,isPaid');
+    if (query && query.trim()) {
+      params.append('query', query.trim());
+    }
+
+    const request = {
+      url: `${API_URL}/globalSearch/findByType/${encodeURIComponent(
+        type
+      )}?${params.toString()}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async globalSearchTopItems(isInfluencer?: boolean): Promise<any> {
+    const endpoint = isInfluencer
+      ? '/globalSearch/influencer/topItems'
+      : '/globalSearch/topItems';
+    const request = {
+      url: `${API_URL}${endpoint}`,
+      options: { method: 'GET' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async addInfluencerRequest(tagId: string): Promise<any> {
+    const request = {
+      url: `${API_URL}/requests/influencerRequest`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({ tagId })
+      },
+      throwError: true
+    };
+    return this.makeRequest(request);
+  }
+
+  async findRequest(params: { tagId: string; type: string }): Promise<any> {
+    const request = {
+      url: `${API_URL}/requests/findOne`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify(params)
+      },
+      throwError: false
+    };
+    return this.makeRequest(request);
+  }
+
+  async getInfluencerRequests(tagId: string): Promise<any> {
+    const request = {
+      url: `${API_URL}/requests/influencerRequests?tagId=${tagId}`,
+      options: { method: 'GET' },
+      throwError: false
+    };
+    return this.makeRequest(request);
+  }
+
+  async handleInfluencerRequest(
+    requestId: string,
+    action: 'accept' | 'reject'
+  ): Promise<any> {
+    const request = {
+      url: `${API_URL}/requests/influencerRequest/handle`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({ requestId, action })
+      },
+      throwError: true
+    };
+    return this.makeRequest(request);
+  }
+
   async imageSearch(query: string): Promise<{ url: string }> {
     const request = {
       url: `${API_URL}/search/image?q=${encodeURIComponent(query)}&new=true`,
@@ -1899,12 +2148,35 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
+  async removeSolutionFromContest(
+    contestId: string | number,
+    solutionId: string | number
+  ): Promise<any> {
+    const request = {
+      url: `${API_URL}/contests/${contestId}/solutions/${solutionId}`,
+      options: { method: 'DELETE' }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
   async getImageAndTitle(
     itemId: number,
     generateImage?: boolean
   ): Promise<{ text: string }> {
     const request = {
       url: `${API_URL}/applications/${itemId}/concept?generateImage=${generateImage}`,
+      options: { method: 'GET' },
+      throwError: true
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async refineTitleWithAi(params: any): Promise<{ text: string }> {
+    const paramString = createParamString(params);
+    const request = {
+      url: `${API_URL}/ai/refineTitleWithAi?${paramString}`,
       options: { method: 'GET' },
       throwError: true
     };
@@ -1942,10 +2214,20 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
-  async getRelationPrompt(payload): Promise<{ text: string }> {
+  async getSolutionRelationship(data, signal = null) {
     const request = {
-      url: `${API_URL}/ai/getRelationPrompt`,
-      options: { method: 'POST', body: JSON.stringify(payload) },
+      url: `${API_URL}/ai/getSolutionRelationship`,
+      options: { method: 'POST', body: JSON.stringify(data), signal },
+      throwError: true
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getComponentRelationship(data, signal = null) {
+    const request = {
+      url: `${API_URL}/ai/getComponentRelationship`,
+      options: { method: 'POST', body: JSON.stringify(data), signal },
       throwError: true
     };
     const res = await this.makeRequest(request);
@@ -1996,6 +2278,16 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
+  async deployNft(appId: string | number): Promise<any> {
+    const request = {
+      url: `${API_URL}/applications/${appId}/deployNft`,
+      options: { method: 'GET' },
+      throwError: true
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
   async nftDeployStart(appId: string | number): Promise<{
     contractAddress: string;
     contractMarketAddress: string;
@@ -2012,7 +2304,7 @@ export class DataProvider implements DataProviderI {
 
   async nftDeployFinish(
     appId: string | number,
-    data: { tokenURI?: string }
+    data: { tokenURI?: string; walletAddress?: string }
   ): Promise<{ nftTransactionUrl: string }> {
     const request = {
       url: `${API_URL}/applications/${appId}/nft`,
@@ -2228,6 +2520,16 @@ export class DataProvider implements DataProviderI {
     return data;
   }
 
+  async getFeedEntitiesCount<T>(filter: object): Promise<any> {
+    const paramString = createParamString({ filter });
+    const request = {
+      url: `${API_URL}/feeds/getFeedEntitiesCount?${paramString}`,
+      options: { method: 'GET' }
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
   async getChallengeTopContests<T>(id: string | number): Promise<T> {
     const request = {
       url: `${API_URL}/challenges/${id}/topContests`,
@@ -2363,26 +2665,12 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
-  async getItemTitles({
-    category,
-    existingId,
-    grandParentTitle,
-    isAnonymousUser,
-    title,
-    userId
-  }) {
+  async getItemTitles(params) {
     const request = {
       url: `${API_URL}/chatbot/getTitles`,
       options: {
         method: 'POST',
-        body: JSON.stringify({
-          category,
-          existingId,
-          grandParentTitle,
-          isAnonymousUser,
-          title,
-          userId
-        })
+        body: JSON.stringify(params)
       }
     };
     const res = await this.makeRequest(request);
@@ -2402,7 +2690,8 @@ export class DataProvider implements DataProviderI {
       options: {
         method: 'POST',
         body: JSON.stringify(params)
-      }
+      },
+      throwError: true
     };
     const res = await this.makeRequest(request);
     return res?.data;
@@ -2420,6 +2709,18 @@ export class DataProvider implements DataProviderI {
         headers: {
           'Content-Type': 'application/json'
         }
+      }
+    };
+
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async getInfluencerEarningStats(influencerId) {
+    const request = {
+      url: `${API_URL}/profiles/getInfluencerEarningStats/${influencerId}`,
+      options: {
+        method: 'GET'
       }
     };
 
@@ -2460,6 +2761,7 @@ export class DataProvider implements DataProviderI {
     redirectURL,
     items,
     pagination,
+    patentFileFlow,
     mode = Constants.PAYMENT
   ): Promise<T> {
     const request = {
@@ -2471,7 +2773,8 @@ export class DataProvider implements DataProviderI {
           redirectURL,
           items,
           pagination,
-          mode
+          mode,
+          patentFileFlow
         })
       }
     };
@@ -2488,7 +2791,7 @@ export class DataProvider implements DataProviderI {
   ): Promise<T> {
     try {
       const request = {
-        url: `${API_URL}/${Constants.INVENTIONSTAKER}/${Constants.CREATE_CHECKOUT_SEESION}`,
+        url: `${API_URL}/${RESOURCE.CROWDFUNDING_CAMPAIGN}/${Constants.CREATE_CHECKOUT_SEESION}`,
         options: {
           method: Constants.POST,
           body: JSON.stringify({
@@ -2545,6 +2848,26 @@ export class DataProvider implements DataProviderI {
         body: JSON.stringify({
           redirectURL,
           items
+        })
+      }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async createIncentiveSession<T>(
+    redirectURL,
+    items,
+    inviteNewUserParms
+  ): Promise<T> {
+    const request = {
+      url: `${API_URL}/${RESOURCE.SUBSCRIPTIONS}/createIncentiveSession`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({
+          redirectURL,
+          items,
+          inviteNewUserParms
         })
       }
     };
@@ -2731,6 +3054,16 @@ export class DataProvider implements DataProviderI {
     return res;
   }
 
+  async influencerShareToSocialMedia(payload: any): Promise<any> {
+    const request = {
+      url: `${API_URL}/share/influencerShareToSocialMedia`,
+      options: { method: 'POST', body: JSON.stringify(payload) },
+      throwError: true
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
   async getCreditsPrices(): Promise<Array<CreditsPrice>> {
     const request = {
       url: `${API_URL}/profiles/credits/prices`,
@@ -2817,7 +3150,7 @@ export class DataProvider implements DataProviderI {
 
   async getTermsAndConditionsDoc<T>(data): Promise<any> {
     const request = {
-      url: `${API_URL}/generateAgreementTemplate`,
+      url: `${API_URL}${PATH_NAMES.USER_AGREEMENTS}/generateAgreementTemplate`,
       options: { method: 'POST', body: JSON.stringify(data) }
     };
     const res = await this.makeRequest(request);
@@ -2826,7 +3159,7 @@ export class DataProvider implements DataProviderI {
 
   async getInventionStakerByApplicationId<T>(data): Promise<any> {
     const request = {
-      url: `${API_URL}/inventionStaker/${data.applicationId}`,
+      url: `${API_URL}/${RESOURCE.CROWDFUNDING_CAMPAIGN}/${data.applicationId}`,
       options: { method: 'GET' }
     };
     const res = await this.makeRequest(request);
@@ -2849,6 +3182,128 @@ export class DataProvider implements DataProviderI {
     };
     const data = await this.makeRequest(request);
     return data;
+  }
+
+  async findConceptsBySolution<T>(params: {
+    solutionId: string;
+    ownerId: string;
+  }) {
+    const paramString = createParamString(params);
+    let requestUrl = `${API_URL}/${RESOURCE.APPLICATIONS}/findBySolution/?${paramString}`;
+    const request = {
+      url: requestUrl
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async findContestsBySolution<T>(params: { solutionId: string }) {
+    let requestUrl = `${API_URL}/${RESOURCE.CONTESTS}/findBySolution/${params.solutionId}`;
+    const request = {
+      url: requestUrl
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async getSurveyByInvention<T>(params: { inventionId: string }) {
+    let requestUrl = `${API_URL}/${RESOURCE.MANUFACTURER_SURVEY_QUESTIONS}/getOneByInvention/${params.inventionId}`;
+    const request = {
+      url: requestUrl
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async getSurveyAnswersByInvention<T>(params: { inventionId: string }) {
+    let requestUrl = `${API_URL}/${RESOURCE.MANUFACTURER_SURVEY_QUESTIONS}/getAnswers/${params.inventionId}`;
+    const request = {
+      url: requestUrl
+    };
+    const data = await this.makeRequest(request);
+    return data;
+  }
+
+  async getBidDetailsEstimation(payload) {
+    const request = {
+      url: `${API_URL}/manufacturerSurveyResponse/getBidDetailsEstimation`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }
+    };
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async sendEthereum(to: string, amount: number, walletAddress: string) {
+    const request = {
+      url: `${API_URL}/blockchain/sendEthereum`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({
+          to,
+          amount,
+          walletAddress
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      },
+      throwError: true,
+      suppressToast: true
+    };
+
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async sendRoyaltyCoin(to: string, amount: number, walletAddress: string) {
+    const request = {
+      url: `${API_URL}/blockchain/sendRoyaltyCoin`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({
+          to,
+          amount,
+          walletAddress
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      },
+      throwError: true,
+      suppressToast: true
+    };
+
+    const res = await this.makeRequest(request);
+    return res;
+  }
+
+  async approveIdeaCoin(
+    spender: string,
+    amount: number,
+    walletAddress: string
+  ) {
+    const request = {
+      url: `${API_URL}/blockchain/approveIdeaCoin`,
+      options: {
+        method: 'POST',
+        body: JSON.stringify({
+          spender,
+          amount,
+          walletAddress
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      },
+      throwError: true,
+      suppressToast: true
+    };
+
+    const res = await this.makeRequest(request);
+    return res;
   }
 
   _prepareCreateParams(params: any) {
