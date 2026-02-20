@@ -17,6 +17,7 @@ const nodeCron = require('node-cron');
 const { getDecryptedPrivateKey } = require('../helpers/encryptionHooks');
 const { RewardIteration } = require('../models/RewardIteration');
 const {
+  CHAIN_IDS,
   ERRORS,
   EVENTS,
   CREDIT_ACTIONS,
@@ -30,6 +31,7 @@ const {
   PAY_STATUS,
   QUOTATION_STATUS,
   STAKED_APPLICATION_STATUS,
+  COMMUNITY_MEMBER,
 } = require('../consts/index');
 const {
   QUEUE_NFT_EMAILS,
@@ -53,7 +55,9 @@ const {
   provider,
   wallet,
   updateUser,
+  getIdeaCoinPriceUsd,
 } = require('../helpers/blockchain');
+const { decryptPrivateKey } = require('../helpers/encryption');
 
 // Load environment variables
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -67,36 +71,51 @@ const {
 } = process.env;
 
 async function getOwnerProfileIdForWallet(
-  targetWalletAddress,
   defaultProfileId,
+  application = null,
 ) {
-  if (typeof targetWalletAddress !== 'string' || !targetWalletAddress) {
-    return defaultProfileId;
-  }
-
-  const walletRegex = new RegExp(`^${targetWalletAddress}$`, 'iu');
-
   try {
     const TagModel = mongoose.model(MODALS.TAG);
 
     const company = await TagModel.findOne({
-      walletAddress: { $regex: walletRegex },
-    });
+      $or: [
+        { owner: defaultProfileId },
+        {
+          $and: [
+            { 'members.profile': defaultProfileId },
+            { 'members.role': COMMUNITY_MEMBER.EMPLOYEE },
+          ],
+        },
+      ],
+    })
+      .select('_id owner')
+      .lean();
 
-    if (company && company.owner) {
-      return company.owner;
+    const profile = await mongoose
+      .model(MODALS.PROFILE)
+      .findById(defaultProfileId)
+      .select('employer')
+      .lean();
+
+    const isEmployeeCase = Boolean(profile?.employer);
+
+    const isOwnerTagApplied = application?.tags?.some(
+      (t) => String(t) === String(company?._id ?? company?.id),
+    );
+
+    if (isEmployeeCase || isOwnerTagApplied) {
+      return company?.owner;
+    } else {
+      return profile?.id ?? profile?._id;
     }
   } catch (error) {
     console.error(
       '[getOwnerProfileIdForWallet] Failed to resolve owner profile:',
       {
         error: error?.message || error,
-        targetWalletAddress,
       },
     );
   }
-
-  return defaultProfileId;
 }
 
 /**
@@ -104,16 +123,41 @@ async function getOwnerProfileIdForWallet(
  * returns that Tag's _id so the invention can also show
  * in the community Inventions tab.
  */
-async function isCommunityEmployee(profileId) {
+async function isCommunityEmployee(profileId, application = null) {
   if (!profileId) return null;
   try {
     const TagModel = mongoose.model(MODALS.TAG);
     const tag = await TagModel.findOne({
-      $or: [{ owner: profileId }, { employees: { $in: [profileId] } }],
+      $or: [
+        { owner: profileId },
+        {
+          $and: [
+            { 'members.profile': profileId },
+            { 'members.role': COMMUNITY_MEMBER.EMPLOYEE },
+          ],
+        },
+      ],
     })
-      .select('_id')
+      .select('_id owner')
       .lean();
-    return tag?._id ?? null;
+
+    const profile = await mongoose
+      .model(MODALS.PROFILE)
+      .findById(profileId)
+      .select('employer')
+      .lean();
+
+    const isEmployeeCase = Boolean(profile?.employer);
+
+    const isOwnerTagApplied = application?.tags?.some(
+      (t) => String(t) === String(tag?._id ?? tag?.id),
+    );
+
+    if (isEmployeeCase || isOwnerTagApplied) {
+      return tag?._id ?? tag?.id;
+    }
+
+    return null;
   } catch (error) {
     console.error(
       '[isCommunityEmployee] Failed to resolve tag for profile:',
@@ -139,8 +183,14 @@ async function finalizeAuctionSettlement({
     throw new Error(ERRORS.NFT_NOT_FOUND);
   }
 
-  const tagId = await isCommunityEmployee(ownerProfileId);
+  const application = await mongoose
+    .model(MODALS.APPLICATION)
+    .findOne({ _id: nft?.invention })
+    .lean();
 
+  console.log('aoop', application);
+  const tagId = await isCommunityEmployee(ownerProfileId, application);
+  console.log('ttt', tagId);
   const owner = tagId ? null : ownerProfileId;
   const companyIdForNft = tagId ? tagId : null;
 
@@ -155,6 +205,8 @@ async function finalizeAuctionSettlement({
     auctionStartTime: null,
     event: eventType,
   };
+
+  console.log('updatedData', updatedData);
 
   await NFT.findByIdAndUpdate(nft._id, updatedData, { new: true });
 
@@ -257,7 +309,11 @@ async function sendEmailViaQueue(user, share) {
   // });
 }
 
-async function getPrivateKeyForWalletAddress(userId, targetWalletAddress) {
+async function getPrivateKeyForWalletAddress(
+  userId,
+  targetWalletAddress,
+  application = null,
+) {
   const adminWalletAddress = wallet?.address?.toLowerCase();
   const targetAddress = targetWalletAddress?.toLowerCase();
 
@@ -271,16 +327,37 @@ async function getPrivateKeyForWalletAddress(userId, targetWalletAddress) {
 
   const Tag = mongoose.model(MODALS.TAG);
   const company = await Tag.findOne({
-    $or: [{ owner: userId }, { employees: { $in: [userId] } }],
+    $or: [
+      { owner: userId },
+      {
+        $and: [
+          { 'members.profile': userId },
+          { 'members.role': COMMUNITY_MEMBER.EMPLOYEE },
+        ],
+      },
+    ],
   });
 
+  const userProfile = await mongoose.model(MODALS.PROFILE).findById(userId);
+
+  const isEmployeeCase = Boolean(userProfile?.employer);
+
+  const isOwnerTagApplied =
+    !isEmployeeCase &&
+    company &&
+    application?.tags?.some(
+      (t) => String(t) === String(company?._id ?? company?.id),
+    );
+
   // Check if wallet belongs to company
-  if (company?.walletAddress?.toLowerCase() === targetAddress) {
+  if (
+    (isEmployeeCase || isOwnerTagApplied) &&
+    company?.walletAddress?.toLowerCase() === targetAddress
+  ) {
     return getDecryptedPrivateKey(company);
   }
 
   // Check if wallet belongs to user
-  const userProfile = await mongoose.model(MODALS.PROFILE).findById(userId);
   if (userProfile?.walletAddress?.toLowerCase() === targetAddress) {
     return getDecryptedPrivateKey(userProfile);
   }
@@ -370,6 +447,20 @@ const blockchainController = {
     } catch (error) {
       console.error(ERRORS.GET_REWARD_THRESHOLD, error);
       res.status(500).json({ error: ERRORS.GET_REWARD_THRESHOLD });
+    }
+  },
+
+  getIdeaCoinPrice: async (req, res) => {
+    try {
+      const chainId = parseInt(req.query.chainId, 10) || CHAIN_IDS.SEPOLIA;
+      const { priceUsd, priceInUsdt } = await getIdeaCoinPriceUsd(chainId);
+      return res.json({ priceUsd, chainId, priceInUsdt });
+    } catch (error) {
+      console.error('[getIdeaCoinPrice]', error?.message || error);
+      return res.status(500).json({
+        priceUsd: 0,
+        error: error?.message || 'Failed to fetch IdeaCoin price',
+      });
     }
   },
 
@@ -514,7 +605,11 @@ const blockchainController = {
         return res.status(400).json({ error: 'Wallet address is required' });
       }
 
-      const nft = await NFT.findOne({ tokenId });
+      const nft = await NFT.findOne({ tokenId }).populate({
+        path: 'invention',
+        model: 'Application',
+        select: 'owner tags',
+      });
       if (nft?.onAuction) {
         const isExpired = await checkNftExpiryFromContract(tokenId);
         if (isExpired) {
@@ -528,6 +623,7 @@ const blockchainController = {
       const privateKey = await getPrivateKeyForWalletAddress(
         req.user.id,
         walletAddress,
+        nft?.invention,
       );
       const signer = new ethers.Wallet(privateKey, provider);
 
@@ -635,6 +731,7 @@ const blockchainController = {
       const privateKey = await getPrivateKeyForWalletAddress(
         req.user.id,
         walletAddress,
+        invention,
       );
       const signer = new ethers.Wallet(privateKey, provider);
 
@@ -748,9 +845,16 @@ const blockchainController = {
         await ideaMarketplaceContractRead.fixedPrice(tokenId);
       const listingOwnerAddress = fixedPriceData.owner.toLowerCase();
 
-      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+      const application = await mongoose
+        .model(MODALS.APPLICATION)
+        .findOne({ _id: nft?.invention })
+        .select('tags')
+        .lean();
+
+      const ownerPrivateKey = await getPrivateKeyForWalletAddress(
         req.user.id,
         listingOwnerAddress,
+        application,
       );
       const signer = new ethers.Wallet(ownerPrivateKey, provider);
 
@@ -799,39 +903,27 @@ const blockchainController = {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
 
-      const targetWalletAddress = walletAddress || req.user.walletAddress;
+      let encryptedPrivateKey;
 
-      if (!targetWalletAddress) {
-        return res.status(400).json({
-          success: false,
-          message: 'Wallet address is required',
-        });
+      const isProfileWallet = await mongoose
+        .model(MODALS.PROFILE)
+        .findOne({ walletAddress })
+        .lean();
+
+      if (isProfileWallet) {
+        encryptedPrivateKey = isProfileWallet?.privateKey;
       }
 
-      // Get the private key for the wallet address (verifies it belongs to user or their company)
-      let privateKey;
-      try {
-        privateKey = await getPrivateKeyForWalletAddress(
-          req.user.id || req.user._id,
-          targetWalletAddress,
-        );
-      } catch (error) {
-        console.error(
-          '[buyFixedTransaction] Error getting private key:',
-          error,
-        );
-        return res.status(500).json({
-          success: false,
-          message: `Private key not found: ${error.message}`,
-        });
+      const isCompanyWallet = await mongoose
+        .model(MODALS.TAG)
+        .findOne({ walletAddress })
+        .lean();
+
+      if (isCompanyWallet) {
+        encryptedPrivateKey = isCompanyWallet?.privateKey;
       }
 
-      if (!privateKey) {
-        return res.status(500).json({
-          success: false,
-          message: 'Private key not found',
-        });
-      }
+      const privateKey = decryptPrivateKey(encryptedPrivateKey);
 
       const signer = new ethers.Wallet(privateKey, provider);
 
@@ -842,16 +934,6 @@ const blockchainController = {
       );
 
       let ownerProfileId = req.user.id || req.user._id;
-      const userWalletLower = (req.user.walletAddress || '').toLowerCase();
-      const targetWalletLower = targetWalletAddress.toLowerCase();
-
-      if (targetWalletLower !== userWalletLower) {
-        ownerProfileId = await getOwnerProfileIdForWallet(
-          targetWalletAddress,
-          ownerProfileId,
-        );
-      }
-      const tagId = await isCommunityEmployee(ownerProfileId);
 
       // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId });
@@ -860,8 +942,12 @@ const blockchainController = {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
 
-      const owner = tagId ? null : ownerProfileId;
-      const companyIdForNft = tagId ? tagId : null;
+      const owner =
+        (isCompanyWallet?.id ?? isCompanyWallet?._id) ? null : ownerProfileId;
+      const companyIdForNft =
+        (isCompanyWallet?.id ?? isCompanyWallet?._id)
+          ? (isCompanyWallet?.id ?? isCompanyWallet?._id)
+          : null;
 
       const updatedData = {
         owner,
@@ -885,8 +971,8 @@ const blockchainController = {
           if (!inventionDoc.createdBy) {
             inventionDoc.createdBy = inventionDoc.owner;
           }
-          if (tagId) {
-            inventionDoc.company = tagId;
+          if (isCompanyWallet?.id ?? isCompanyWallet?._id) {
+            inventionDoc.company = isCompanyWallet?.id ?? isCompanyWallet?._id;
             inventionDoc.owner = null;
           } else {
             inventionDoc.company = null;
@@ -962,23 +1048,38 @@ const blockchainController = {
       const company = await mongoose.model(MODALS.TAG).findOne({
         $or: [
           { owner: req?.user?.id },
-          { employees: { $in: [req?.user?.id] } },
+          {
+            $and: [
+              { 'members.profile': req?.user?.id },
+              { 'members.role': COMMUNITY_MEMBER.EMPLOYEE },
+            ],
+          },
         ],
       });
 
+      const userProfile = await mongoose
+        .model(MODALS.PROFILE)
+        .findById(req?.user?.id);
+
+      const isEmployeeCase = Boolean(userProfile?.employer);
+
+      const isOwnerTagApplied =
+        !isEmployeeCase &&
+        company &&
+        application?.tags?.some(
+          (t) => String(t) === String(company?._id ?? company?.id),
+        );
+
       if (
-        company?.walletAddress?.toLowerCase() ===
-        targetWalletAddress.toLowerCase()
+        isOwnerTagApplied &&
+        company?.walletAddress?.toLowerCase() === walletAddress.toLowerCase()
       ) {
         await blockchainController.distributeIdeaRewards(
           company.walletAddress,
           2,
         );
       } else {
-        await blockchainController.distributeIdeaRewards(
-          targetWalletAddress,
-          2,
-        );
+        await blockchainController.distributeIdeaRewards(walletAddress, 2);
       }
 
       const reward = 2 * 0.1;
@@ -1088,19 +1189,6 @@ const blockchainController = {
         });
       }
 
-      const privateKey = await getPrivateKeyForWalletAddress(
-        req.user.id,
-        walletAddress,
-      );
-      const signer = new ethers.Wallet(privateKey, provider);
-
-      const ideaMarketplaceContract = new ethers.Contract(
-        marketplaceContractAddress,
-        IdeaMarketplaceAbi,
-        signer,
-      );
-
-      // ********************** NFT Table Update *******************
       const nft = await NFT.findOne({ tokenId }).populate({
         path: 'invention',
         populate: {
@@ -1112,6 +1200,21 @@ const blockchainController = {
       if (!nft) {
         return res.status(404).json({ error: ERRORS.NFT_NOT_FOUND });
       }
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+        nft?.invention,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      const ideaMarketplaceContract = new ethers.Contract(
+        marketplaceContractAddress,
+        IdeaMarketplaceAbi,
+        signer,
+      );
+
+      // ********************** NFT Table Update *******************
 
       const invention = nft?.invention;
       if (!invention) {
@@ -1270,9 +1373,16 @@ const blockchainController = {
       const auctionData = await ideaMarketplaceContract.auction(tokenId);
       const auctionOwnerAddress = auctionData.nftOwner.toLowerCase();
 
-      const ownerPrivateKey = await getPrivateKeyForListingOwner(
+      const application = await mongoose
+        .model(MODALS.APPLICATION)
+        .findOne({ _id: nft?.invention })
+        .select('tags')
+        .lean();
+
+      const ownerPrivateKey = await getPrivateKeyForWalletAddress(
         req.user.id,
         auctionOwnerAddress,
+        application,
       );
 
       const signer = new ethers.Wallet(ownerPrivateKey, provider);
@@ -1391,11 +1501,27 @@ const blockchainController = {
       if (!auctionId || !bidAmount || !usdPrice || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
+      let encryptedPrivateKey;
 
-      const privateKey = await getPrivateKeyForWalletAddress(
-        req.user.id,
-        walletAddress,
-      );
+      const isProfileWallet = await mongoose
+        .model(MODALS.PROFILE)
+        .findOne({ walletAddress })
+        .lean();
+
+      if (isProfileWallet) {
+        encryptedPrivateKey = isProfileWallet?.privateKey;
+      }
+
+      const isCompanyWallet = await mongoose
+        .model(MODALS.TAG)
+        .findOne({ walletAddress })
+        .lean();
+
+      if (isCompanyWallet) {
+        encryptedPrivateKey = isCompanyWallet?.privateKey;
+      }
+
+      const privateKey = decryptPrivateKey(encryptedPrivateKey);
       const signer = new ethers.Wallet(privateKey, provider);
 
       // Verify seller cannot bid on their own NFT
@@ -1554,10 +1680,19 @@ const blockchainController = {
         });
       }
 
+      const nft = await NFT.findOne({ tokenId }).populate({
+        path: 'invention',
+        populate: {
+          path: 'crowdfundingCampaign',
+          select: 'status', // Populate campaign to get status
+        },
+      });
+
       // Now get private key and create signer (after verification)
       const privateKey = await getPrivateKeyForWalletAddress(
         req.user.id,
         walletAddress,
+        nft?.invention,
       );
       const signer = new ethers.Wallet(privateKey, provider);
 
@@ -1573,10 +1708,9 @@ const blockchainController = {
 
       const { transactionHash, from, to } = receipt;
 
-      const highestBidderAddress = auctionData.currentBidder.toLowerCase();
       const ownerProfileId = await getOwnerProfileIdForWallet(
-        highestBidderAddress,
         bidOwnerId || req.user.id || req.user._id,
+        nft?.invention,
       );
 
       const user = await mongoose.model(MODALS.PROFILE).findOne({
@@ -1615,20 +1749,30 @@ const blockchainController = {
       if (!auctionId || !walletAddress) {
         return res.status(400).json({ error: ERRORS.INVALID_PARAMETER });
       }
-
-      const privateKey = await getPrivateKeyForWalletAddress(
-        req.user.id,
-        walletAddress,
-      );
-      const signer = new ethers.Wallet(privateKey, provider);
-
-      // Verify only the highest bidder can claim
       const ideaMarketplaceContractRead = new ethers.Contract(
         marketplaceContractAddress,
         IdeaMarketplaceAbi,
         provider,
       );
       const auctionData = await ideaMarketplaceContractRead.auction(auctionId);
+      const tokenId = Number(auctionData.tokenId.toString());
+
+      const nft = await NFT.findOne({ tokenId }).populate({
+        path: 'invention',
+        populate: {
+          path: 'crowdfundingCampaign',
+          select: 'status', // Populate campaign to get status
+        },
+      });
+
+      const privateKey = await getPrivateKeyForWalletAddress(
+        req.user.id,
+        walletAddress,
+        nft?.invention,
+      );
+      const signer = new ethers.Wallet(privateKey, provider);
+
+      // Verify only the highest bidder can claim
       const highestBidderAddress = auctionData.currentBidder.toLowerCase();
       const claimerAddress = signer.address.toLowerCase();
 
@@ -1639,13 +1783,13 @@ const blockchainController = {
         });
       }
 
-      const ideaMarketplaceContract = new ethers.Contract(
+      const signerContract = new ethers.Contract(
         marketplaceContractAddress,
         IdeaMarketplaceAbi,
         signer,
       );
 
-      const claimNftTxn = await ideaMarketplaceContract.claimNft(auctionId);
+      const claimNftTxn = await signerContract.claimNft(auctionId);
       const receipt = await claimNftTxn.wait();
 
       const { transactionHash, from, to } = receipt;
@@ -1656,8 +1800,8 @@ const blockchainController = {
 
       if (targetWalletLower !== userWalletLower) {
         ownerProfileId = await getOwnerProfileIdForWallet(
-          walletAddress,
           ownerProfileId,
+          nft?.invention,
         );
       }
 
