@@ -2,7 +2,6 @@ import { BigNumber } from 'ethers';
 import {
   BUY_NFT,
   BUY_NFT_SUCCESS,
-  BUY_NFT_FAILURE,
   CANCEL_FIXED_NFT,
   CANCEL_FIXED_NFT_SUCCESS,
   CANCEL_FIXED_NFT_FAILURE,
