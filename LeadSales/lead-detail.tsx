@@ -1,13 +1,12 @@
 import { useRoute } from "wouter";
-import { users as mockUsers, activitiesTimeline } from "@/lib/mock-data";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Linkedin, Mail, ArrowLeft, Calendar, Building2, User2, Briefcase, MessageSquare, Phone, StickyNote, History, ChevronDown, ChevronUp, Plus, LayoutDashboard, Zap } from "lucide-react";
+import { Linkedin, Mail, ArrowLeft, Building2, Phone, StickyNote, History, ChevronDown, ChevronUp, Plus, Zap, CalendarClock } from "lucide-react";
 import { Link } from "wouter";
 import { format, parseISO } from "date-fns";
 import { useAuth } from "@/hooks/use-auth";
-import { Role, Lead, ActivityTimeline, User } from "@/lib/types";
+import { Role, Lead, ActivityTimeline, User, Team, Plan } from "@/lib/types";
 import { useState, useEffect } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -15,8 +14,22 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { PhoneInput } from "@/components/ui/phone-input";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { isPhoneValid, normalizePhoneForSave } from "@/lib/phone";
+
+type LeadTask = {
+  id: string;
+  leadId: string;
+  userId: string;
+  type: string;
+  status: string;
+  priority: string;
+  dueDate: string;
+  notes?: string | null;
+  createdAt?: string;
+};
 
 export default function LeadDetailsPage() {
   const { user: authUser } = useAuth();
@@ -25,19 +38,36 @@ export default function LeadDetailsPage() {
   const [, params] = useRoute("/leads/:id");
   const leadId = params?.id;
 
-  const { data: leads = [], isLoading: isLoadingLeads } = useQuery<Lead[]>({
-    queryKey: ["/api/leads"],
+  const { data: lead, isLoading: isLoadingLead } = useQuery<Lead>({
+    queryKey: [`/api/leads/${leadId}`],
+    enabled: !!leadId,
   });
 
   const { data: usersList = [] } = useQuery<User[]>({
     queryKey: ["/api/users"],
   });
+  const { data: teamsList = [] } = useQuery<Team[]>({
+    queryKey: ["/api/teams"],
+  });
+  const { data: plansList = [] } = useQuery<Plan[]>({
+    queryKey: ["/api/plans"],
+  });
 
-  const lead = leads.find(l => l.id === leadId);
   const owner = usersList.find(u => u.id === lead?.ownerId);
+  const team = teamsList.find((t) => t.id === lead?.teamId);
+  const plan = plansList.find((p) => p.id === lead?.planId);
 
   const { data: timelineEntries = [], refetch: refetchTimeline } = useQuery<ActivityTimeline[]>({
     queryKey: [`/api/activity-timeline/${leadId}`],
+    enabled: !!leadId,
+  });
+  const {
+    data: leadTasks = [],
+    isLoading: isLoadingLeadTasks,
+    isError: isLeadTasksError,
+    refetch: refetchLeadTasks,
+  } = useQuery<LeadTask[]>({
+    queryKey: [leadId ? `/api/tasks?leadId=${leadId}` : "/api/tasks"],
     enabled: !!leadId,
   });
 
@@ -51,23 +81,65 @@ export default function LeadDetailsPage() {
   const [isNoteOpen, setIsNoteOpen] = useState(false);
   const [isCallOpen, setIsCallOpen] = useState(false);
   const [isTaskOpen, setIsTaskOpen] = useState(false);
-  const [isTeamsOpen, setIsTeamsOpen] = useState(false);
+  const [isTeamAssignOpen, setIsTeamAssignOpen] = useState(false);
   const [isEditInfoOpen, setIsEditInfoOpen] = useState(false);
+  const [linkedinMessageType, setLinkedinMessageType] = useState<"conn" | "dm" | "inmail">("dm");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
+
+  const formatStageLabel = (stage: string) => {
+    if (stage === "MEETING_SET") return "Meeting Set";
+    return stage;
+  };
+
+  const [taskType, setTaskType] = useState<"EMAIL" | "LINKEDIN" | "CALL">("EMAIL");
+  const [taskPriority, setTaskPriority] = useState<"LOW" | "MEDIUM" | "HIGH">("MEDIUM");
+  const [taskDueDate, setTaskDueDate] = useState(format(new Date(), "yyyy-MM-dd"));
+  const [taskNotes, setTaskNotes] = useState("");
 
   // Edit fields state
   const [editEmail, setEditEmail] = useState(lead?.email || "");
   const [editLinkedin, setEditLinkedin] = useState(lead?.linkedinUrl || "");
   const [editPhone, setEditPhone] = useState(lead?.phone || "");
+  const [editCompany, setEditCompany] = useState(lead?.company || "");
+  const [editSource, setEditSource] = useState(lead?.source || "");
+  const [editValue, setEditValue] = useState(
+    typeof lead?.value === "number" ? String(lead.value) : "",
+  );
+  const isEditPhoneValid = isPhoneValid(editPhone);
+  const isEditValueValid = editValue.trim() === "" || /^\d+$/.test(editValue);
 
   useEffect(() => {
     if (isEditInfoOpen && lead) {
       setEditEmail(lead.email || "");
       setEditLinkedin(lead.linkedinUrl || "");
       setEditPhone(lead.phone || "");
+      setEditCompany(lead.company || "");
+      setEditSource(lead.source || "");
+      setEditValue(typeof lead.value === "number" ? String(lead.value) : "");
     }
   }, [isEditInfoOpen, lead]);
 
-  if (isLoadingLeads) {
+  useEffect(() => {
+    if (!leadId) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("edit") === "contact") {
+      setIsEditInfoOpen(true);
+    }
+  }, [leadId]);
+
+  useEffect(() => {
+    // Once a connection is accepted, connection request logging is no longer valid for this lead.
+    if (lead?.connectionStatus === "ACCEPTED" && linkedinMessageType === "conn") {
+      setLinkedinMessageType("dm");
+    }
+  }, [lead?.connectionStatus, linkedinMessageType]);
+
+  useEffect(() => {
+    if (!lead) return;
+    setSelectedTeamId(lead.teamId || "");
+  }, [lead?.id, lead?.teamId]);
+
+  if (isLoadingLead) {
     return (
       <div className="flex items-center justify-center p-8">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
@@ -90,6 +162,10 @@ export default function LeadDetailsPage() {
   const isSuperAdmin = authUser.role === Role.ADMIN;
   const isTeamLead = authUser.role === Role.TEAM_LEAD && lead.teamId === authUser.teamId;
   const isOwner = lead.ownerId === authUser.id;
+  const canReassignTeam = isSuperAdmin || isTeamLead;
+  const teamOptions = isSuperAdmin
+    ? teamsList
+    : teamsList.filter((candidateTeam) => candidateTeam.id === authUser.teamId);
 
   if (!isSuperAdmin && !isTeamLead && !isOwner) {
     return (
@@ -125,6 +201,25 @@ export default function LeadDetailsPage() {
 
   const touchpoints = timelineEntries.filter(at => at.type !== "status_change");
   const lastTouch = touchpoints.length > 0 ? touchpoints.sort((a,b) => new Date(b.happenedAt).getTime() - new Date(a.happenedAt).getTime())[0] : null;
+  const formatTimelineDateTime = (value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "N/A";
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      // activity_timeline currently stores timestamp without timezone, and API serializes
+      // it as ISO(Z). Rendering with UTC avoids the +5h double-shift for current data.
+      timeZone: "UTC",
+    }).format(parsed);
+  };
+  const visibleLeadTasks = [...leadTasks].sort((a, b) => {
+    const dateA = new Date(a.createdAt || a.dueDate).getTime();
+    const dateB = new Date(b.createdAt || b.dueDate).getTime();
+    return dateB - dateA;
+  });
 
   const logActivity = async (type: string, body: string, notes?: string, extra?: any) => {
     try {
@@ -133,7 +228,7 @@ export default function LeadDetailsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           leadId,
-          teamId: lead.teamId,
+          teamId: lead.teamId || authUser.teamId || "global",
           createdByUserId: authUser.id,
           activityType: type,
           body,
@@ -142,6 +237,7 @@ export default function LeadDetailsPage() {
         })
       });
       refetchTimeline();
+      queryClient.invalidateQueries({ queryKey: ["/api/activities"] });
     } catch (error) {
       console.error("Failed to log activity", error);
     }
@@ -203,10 +299,12 @@ export default function LeadDetailsPage() {
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
                   <Label>Message Type</Label>
-                  <Select defaultValue="dm">
+                  <Select value={linkedinMessageType} onValueChange={(value: "conn" | "dm" | "inmail") => setLinkedinMessageType(value)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="conn">Connection Request</SelectItem>
+                      {lead.connectionStatus !== "ACCEPTED" && (
+                        <SelectItem value="conn">Connection Request</SelectItem>
+                      )}
                       <SelectItem value="dm">Direct Message</SelectItem>
                       <SelectItem value="inmail">InMail</SelectItem>
                     </SelectContent>
@@ -219,7 +317,19 @@ export default function LeadDetailsPage() {
               </div>
               <DialogFooter>
                 <Button className="w-full" onClick={() => {
-                  logActivity("linkedin_message", "Logged LinkedIn message");
+                  if (linkedinMessageType === "conn" && lead.connectionStatus === "ACCEPTED") {
+                    toast({
+                      title: "Already accepted",
+                      description: "Connection request is already accepted for this lead. Log DM or InMail instead.",
+                    });
+                    return;
+                  }
+                  const bodyByType: Record<"conn" | "dm" | "inmail", string> = {
+                    conn: "Logged LinkedIn connection request",
+                    dm: "Logged LinkedIn direct message",
+                    inmail: "Logged LinkedIn InMail",
+                  };
+                  logActivity("linkedin_message", bodyByType[linkedinMessageType], undefined, { channel: linkedinMessageType });
                   toast({ title: "Message Logged", description: "Activity recorded in timeline." });
                   setIsLinkedInOpen(false);
                 }}>Save Activity</Button>
@@ -306,7 +416,7 @@ export default function LeadDetailsPage() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="p-4 flex flex-col items-center justify-center text-center">
           <p className="text-xs font-semibold text-muted-foreground uppercase">Current Stage</p>
-          <Badge className="mt-1">{lead.stage}</Badge>
+          <Badge className="mt-1">{formatStageLabel(lead.stage)}</Badge>
         </Card>
         <Card className="p-4 flex flex-col items-center justify-center text-center">
           <p className="text-xs font-semibold text-muted-foreground uppercase">Touchpoints</p>
@@ -319,41 +429,98 @@ export default function LeadDetailsPage() {
           </p>
         </Card>
         <Card className="p-4 flex flex-col items-center justify-center text-center">
-          <p className="text-xs font-semibold text-muted-foreground uppercase">Assigned Team(s)</p>
-          <div className="flex flex-wrap gap-1 justify-center mt-1">
-            <Badge variant="outline">{lead.teamId === "1" ? "Strategic" : "Mid-Market"}</Badge>
-            {isSuperAdmin && (
-              <Dialog open={isTeamsOpen} onOpenChange={setIsTeamsOpen}>
-                <DialogTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-4 w-4 ml-1">
-                    <Plus className="w-3 h-3" />
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>Manage Teams for {lead.firstName}</DialogTitle>
-                    <DialogDescription>Assign this lead to multiple teams for cross-functional outreach.</DialogDescription>
-                  </DialogHeader>
-                  <div className="grid gap-4 py-4">
-                    <div className="flex flex-wrap gap-2">
-                      {["Strategic", "Mid-Market", "Enterprise", "Outbound"].map(t => (
-                        <div key={t} className="flex items-center space-x-2 border p-2 rounded">
-                          <input type="checkbox" id={`team-${t}`} defaultChecked={t === "Strategic"} />
-                          <label htmlFor={`team-${t}`} className="text-sm">{t}</label>
-                        </div>
+          <p className="text-xs font-semibold text-muted-foreground uppercase">Assigned Team</p>
+          <Badge variant="outline" className="mt-1">{team?.name || "Unassigned"}</Badge>
+          {canReassignTeam && (
+            <Dialog open={isTeamAssignOpen} onOpenChange={setIsTeamAssignOpen}>
+              <DialogTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 mt-1 text-xs underline">
+                  Reassign Team
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Reassign Team</DialogTitle>
+                  <DialogDescription>
+                    Assign this lead to a team. Team lead owner mapping will be aligned automatically.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-2 py-3">
+                  <Label>Team</Label>
+                  <Select value={selectedTeamId || "__none__"} onValueChange={(value) => setSelectedTeamId(value === "__none__" ? "" : value)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select team" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Unassigned</SelectItem>
+                      {teamOptions.map((candidateTeam) => (
+                        <SelectItem key={candidateTeam.id} value={candidateTeam.id}>
+                          {candidateTeam.name}
+                        </SelectItem>
                       ))}
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button className="w-full" onClick={() => {
-                      toast({ title: "Teams Updated", description: "Lead assignment has been updated." });
-                      setIsTeamsOpen(false);
-                    }}>Save Assignments</Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            )}
-          </div>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <DialogFooter>
+                  <Button
+                    className="w-full"
+                    disabled={!selectedTeamId}
+                    onClick={async () => {
+                      if (!leadId || !selectedTeamId) return;
+                      try {
+                        const selectedTeam = teamsList.find((candidateTeam) => candidateTeam.id === selectedTeamId);
+                        const currentOwner = usersList.find((candidateUser) => candidateUser.id === lead.ownerId);
+                        const currentOwnerMatchesTeam =
+                          !!currentOwner &&
+                          currentOwner.role === Role.TEAM_LEAD &&
+                          (currentOwner.teamId === selectedTeamId ||
+                            selectedTeam?.leadId === currentOwner.id);
+                        const nextOwnerId = currentOwnerMatchesTeam
+                          ? lead.ownerId
+                          : selectedTeam?.leadId;
+
+                        if (!nextOwnerId) {
+                          throw new Error("Selected team has no configured team lead to assign as owner.");
+                        }
+
+                        const res = await fetch(`/api/leads/${leadId}`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            teamId: selectedTeamId,
+                            ownerId: nextOwnerId,
+                          }),
+                        });
+                        if (!res.ok) {
+                          const data = await res.json().catch(() => ({}));
+                          throw new Error(data?.message || "Failed to update team assignment");
+                        }
+                        await queryClient.invalidateQueries({ queryKey: [`/api/leads/${leadId}`] });
+                        await queryClient.invalidateQueries({ queryKey: ["/api/leads"] });
+                        toast({
+                          title: "Team Updated",
+                          description: "Lead team assignment has been updated.",
+                        });
+                        setIsTeamAssignOpen(false);
+                      } catch (err: any) {
+                        toast({
+                          title: "Error",
+                          description: err?.message || "Failed to update team assignment.",
+                          variant: "destructive",
+                        });
+                      }
+                    }}
+                  >
+                    Save Team
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          )}
+        </Card>
+        <Card className="p-4 flex flex-col items-center justify-center text-center">
+          <p className="text-xs font-semibold text-muted-foreground uppercase">Assigned Plan</p>
+          <Badge variant="outline" className="mt-1">{plan?.name || "No Plan"}</Badge>
         </Card>
         <Card className="p-4 flex flex-col items-center justify-center text-center">
           <p className="text-xs font-semibold text-muted-foreground uppercase">Owner</p>
@@ -394,7 +561,7 @@ export default function LeadDetailsPage() {
           </CardHeader>
           <CardContent className="pt-4">
             <div className="relative space-y-6 before:absolute before:inset-0 before:ml-4 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent">
-              {filteredTimeline.map((item, idx) => {
+              {filteredTimeline.map((item) => {
                 const creator = usersList.find(u => u.id === item.createdByUserId);
                 const isExpanded = expandedItems[item.id];
                 
@@ -419,7 +586,7 @@ export default function LeadDetailsPage() {
                           <span className="text-xs text-muted-foreground ml-2">by {creator?.name}</span>
                         </div>
                         <time className="text-[10px] text-muted-foreground font-medium bg-muted px-2 py-0.5 rounded-full">
-                          {item.happenedAt ? format(parseISO(item.happenedAt), "MMM d, h:mm a") : "N/A"}
+                          {item.happenedAt ? formatTimelineDateTime(item.happenedAt) : "N/A"}
                         </time>
                       </div>
                       <Card className={cn("transition-all duration-200 hover:shadow-md", isExpanded ? "border-primary/20 bg-primary/[0.01]" : "border-border/50")}>
@@ -464,8 +631,10 @@ export default function LeadDetailsPage() {
                 </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
-                    <DialogTitle>Edit Contact Information</DialogTitle>
-                    <DialogDescription>Update the email, LinkedIn URL, and phone number for {lead.firstName}.</DialogDescription>
+                    <DialogTitle>Edit Quick Info</DialogTitle>
+                    <DialogDescription>
+                      Update contact and company details for {lead.firstName}.
+                    </DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4 py-4">
                     <div className="space-y-2">
@@ -488,17 +657,63 @@ export default function LeadDetailsPage() {
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="edit-phone">Phone Number</Label>
-                      <Input 
+                      <PhoneInput
                         id="edit-phone" 
                         value={editPhone} 
-                        onChange={(e) => setEditPhone(e.target.value)} 
+                        onChange={(value) => setEditPhone(value)} 
                         placeholder="+1 (555) 000-0000"
                       />
+                      {!isEditPhoneValid && (
+                        <p className="text-xs text-destructive">
+                          Enter a valid phone number with country code (e.g. +92...).
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="edit-company">Company</Label>
+                      <Input
+                        id="edit-company"
+                        value={editCompany}
+                        onChange={(e) => setEditCompany(e.target.value)}
+                        placeholder="Company name"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="edit-source">Source</Label>
+                      <Input
+                        id="edit-source"
+                        value={editSource}
+                        onChange={(e) => setEditSource(e.target.value)}
+                        placeholder="LinkedIn / Referral / Website"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="edit-value">Value</Label>
+                      <Input
+                        id="edit-value"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={editValue}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === "" || /^\d+$/.test(raw)) {
+                            setEditValue(raw);
+                          }
+                        }}
+                        placeholder="5000"
+                      />
+                      {!isEditValueValid && (
+                        <p className="text-xs text-destructive">
+                          Value must contain digits only.
+                        </p>
+                      )}
                     </div>
                   </div>
                   <DialogFooter>
                     <Button
                       className="w-full"
+                      disabled={!isEditPhoneValid || !isEditValueValid}
                       onClick={async () => {
                         try {
                           if (!leadId) return;
@@ -506,6 +721,11 @@ export default function LeadDetailsPage() {
                           const currentEmail = lead.email || "";
                           const currentLinkedin = lead.linkedinUrl || "";
                           const currentPhone = lead.phone || "";
+                          const currentCompany = lead.company || "";
+                          const currentSource = lead.source || "";
+                          const currentValue =
+                            typeof lead.value === "number" ? String(lead.value) : "";
+                          const normalizedPhone = normalizePhoneForSave(editPhone);
 
                           const updates: Partial<Lead> = {};
                           if (editEmail !== currentEmail) {
@@ -515,7 +735,28 @@ export default function LeadDetailsPage() {
                             updates.linkedinUrl = editLinkedin || null;
                           }
                           if (editPhone !== currentPhone) {
-                            updates.phone = editPhone || null;
+                            if (editPhone.trim().length > 0 && !normalizedPhone) {
+                              throw new Error("Please enter a valid phone number with country code.");
+                            }
+                            updates.phone = normalizedPhone;
+                          }
+                          if (editCompany !== currentCompany) {
+                            if (!editCompany.trim()) {
+                              throw new Error("Company is required.");
+                            }
+                            updates.company = editCompany.trim();
+                          }
+                          if (editSource !== currentSource) {
+                            if (!editSource.trim()) {
+                              throw new Error("Source is required.");
+                            }
+                            updates.source = editSource.trim();
+                          }
+                          if (editValue !== currentValue) {
+                            if (!editValue.trim() || !/^\d+$/.test(editValue)) {
+                              throw new Error("Value is required and must be a non-negative number.");
+                            }
+                            updates.value = Number(editValue);
                           }
 
                           // If nothing changed, just close the dialog.
@@ -535,6 +776,7 @@ export default function LeadDetailsPage() {
                             throw new Error(data?.message || "Failed to update lead");
                           }
 
+                          await queryClient.invalidateQueries({ queryKey: [`/api/leads/${leadId}`] });
                           await queryClient.invalidateQueries({ queryKey: ["/api/leads"] });
 
                           toast({
@@ -596,6 +838,16 @@ export default function LeadDetailsPage() {
                   {lead.company}
                 </div>
               </div>
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-muted-foreground uppercase">Source</p>
+                <div className="text-sm font-medium">{lead.source || "-"}</div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-muted-foreground uppercase">Value</p>
+                <div className="text-sm font-medium">
+                  {typeof lead.value === "number" ? lead.value.toLocaleString() : "-"}
+                </div>
+              </div>
             </CardContent>
           </Card>
 
@@ -614,7 +866,7 @@ export default function LeadDetailsPage() {
                   <div className="space-y-4 py-4">
                     <div className="space-y-2">
                       <Label>Task Type</Label>
-                      <Select defaultValue="EMAIL">
+                      <Select value={taskType} onValueChange={(val) => setTaskType(val as typeof taskType)}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="EMAIL">Email Follow-up</SelectItem>
@@ -625,26 +877,128 @@ export default function LeadDetailsPage() {
                     </div>
                     <div className="space-y-2">
                       <Label>Due Date</Label>
-                      <Input type="date" defaultValue={format(new Date(), "yyyy-MM-dd")} />
+                      <Input
+                        type="date"
+                        value={taskDueDate}
+                        onChange={(e) => setTaskDueDate(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Priority</Label>
+                      <Select
+                        value={taskPriority}
+                        onValueChange={(val: "LOW" | "MEDIUM" | "HIGH") => setTaskPriority(val)}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="LOW">Low</SelectItem>
+                          <SelectItem value="MEDIUM">Medium</SelectItem>
+                          <SelectItem value="HIGH">High</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div className="space-y-2">
                       <Label>Notes</Label>
-                      <Textarea placeholder="What needs to be done?" />
+                      <Textarea
+                        placeholder="What needs to be done?"
+                        value={taskNotes}
+                        onChange={(e) => setTaskNotes(e.target.value)}
+                      />
                     </div>
                   </div>
                   <DialogFooter>
-                    <Button className="w-full" onClick={() => {
-                      toast({ title: "Task Created", description: "New task has been scheduled." });
-                      setIsTaskOpen(false);
-                    }}>Create Task</Button>
+                    <Button
+                      className="w-full"
+                      onClick={async () => {
+                        if (!leadId || !authUser) return;
+                        try {
+                          const res = await fetch("/api/tasks", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              leadId,
+                              userId: authUser.id,
+                              type: taskType,
+                              priority: taskPriority,
+                              dueDate: taskDueDate,
+                              notes: taskNotes || undefined,
+                            }),
+                          });
+
+                          if (!res.ok) {
+                            const data = await res.json().catch(() => ({}));
+                            throw new Error(data?.message || "Failed to create task");
+                          }
+
+                          // Invalidate tasks list (if Tasks page is open)
+                          queryClient.invalidateQueries({
+                            queryKey: [authUser ? `/api/tasks?userId=${authUser.id}` : "/api/tasks"],
+                          });
+                          queryClient.invalidateQueries({
+                            queryKey: [leadId ? `/api/tasks?leadId=${leadId}` : "/api/tasks"],
+                          });
+                          await refetchLeadTasks();
+
+                          // Task creation is already logged server-side in /api/tasks.
+                          // Refetch timeline to show the new backend entry without duplicating it.
+                          await refetchTimeline();
+
+                          toast({ title: "Task Created", description: "New task has been scheduled." });
+                          setIsTaskOpen(false);
+                          setTaskType("EMAIL");
+                          setTaskPriority("MEDIUM");
+                          setTaskDueDate(format(new Date(), "yyyy-MM-dd"));
+                          setTaskNotes("");
+                        } catch (err: any) {
+                          toast({
+                            title: "Error",
+                            description: err?.message || "Failed to create task.",
+                            variant: "destructive",
+                          });
+                        }
+                      }}
+                    >
+                      Create Task
+                    </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="p-3 border rounded-lg bg-muted/20 text-xs text-muted-foreground text-center italic">
-                No pending tasks for this lead.
-              </div>
+              {isLoadingLeadTasks ? (
+                <div className="p-3 border rounded-lg bg-muted/20 text-xs text-muted-foreground text-center italic">
+                  Loading tasks...
+                </div>
+              ) : isLeadTasksError ? (
+                <div className="p-3 border rounded-lg bg-destructive/10 text-xs text-destructive text-center">
+                  Failed to load tasks for this lead.
+                </div>
+              ) : visibleLeadTasks.length === 0 ? (
+                <div className="p-3 border rounded-lg bg-muted/20 text-xs text-muted-foreground text-center italic">
+                  No tasks found for this lead.
+                </div>
+              ) : (
+                visibleLeadTasks.map((task) => (
+                  <div key={task.id} className="p-3 border rounded-lg bg-muted/20">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">{task.type}</p>
+                      <Badge variant={task.status === "COMPLETED" ? "secondary" : "outline"} className="text-[10px] px-1.5 py-0">
+                        {task.status}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center justify-between mt-1 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        <CalendarClock className="w-3 h-3" />
+                        {format(parseISO(task.dueDate), "MMM d")}
+                      </span>
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                        {task.priority}
+                      </Badge>
+                    </div>
+                    {task.notes ? <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{task.notes}</p> : null}
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
         </div>
