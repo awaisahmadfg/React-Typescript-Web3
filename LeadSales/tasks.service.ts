@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
-import { activityTimeline } from "@shared/schema";
-import { sql } from "drizzle-orm";
+import { activityTimeline, users } from "@shared/schema";
+import { inArray, sql } from "drizzle-orm";
 import { db } from "../database/db";
 import { storage } from "../database/storage";
 import type { IdParam, TaskCreateBody, TaskFiltersQuery, TaskUpdateBody } from "../types/payloads";
@@ -19,12 +19,33 @@ export const taskHandlers = {
     }
 
     if (currentUser.role === "TEAM_LEAD") {
-      const teamLeads = await storage.getLeads({
-        teamId: currentUser.teamId ?? undefined,
-        includeStale: "true",
+      const teams = await storage.getTeams();
+      const managedTeamIds = new Set<string>();
+      teams.forEach((team) => {
+        if (team.leadId === currentUser.id) {
+          managedTeamIds.add(team.id);
+        }
       });
-      const teamLeadIds = new Set(teamLeads.map((lead) => lead.id));
-      return res.json(tasks.filter((task) => teamLeadIds.has(task.leadId)));
+      // Backward-compat fallback: if no team references this lead yet, use assigned teamId.
+      if (managedTeamIds.size === 0 && currentUser.teamId) {
+        managedTeamIds.add(currentUser.teamId);
+      }
+      const managedTeamIdsList = Array.from(managedTeamIds);
+      const teamMembers =
+        managedTeamIdsList.length > 0
+          ? await db
+              .select({ id: users.id })
+              .from(users)
+              .where(inArray(users.teamId, managedTeamIdsList))
+          : [];
+      const visibleOwnerIds = new Set<string>([currentUser.id, ...teamMembers.map((member) => member.id)]);
+      const visibleLeadIds = new Set(
+        (await storage.getLeads({ includeStale: "true" }))
+          .filter((lead) => visibleOwnerIds.has(lead.ownerId))
+          .map((lead) => lead.id),
+      );
+
+      return res.json(tasks.filter((task) => visibleLeadIds.has(task.leadId)));
     }
 
     return res.json(tasks.filter((task) => task.userId === currentUser.id));
@@ -49,28 +70,50 @@ export const taskHandlers = {
 
     let effectiveUserId = userId || currentUser.id;
     const assignee = await storage.getUser(effectiveUserId);
-    if (!assignee || assignee.role !== "TEAM_LEAD") {
-      return res.status(400).json({ message: "Task assignee must be a Team Lead." });
+    if (!assignee) {
+      return res.status(400).json({ message: "Selected assignee does not exist." });
     }
+    if (assignee.isActive === false) {
+      return res.status(400).json({ message: "Selected assignee is inactive." });
+    }
+
     if (currentUser.role === "ADMIN") {
-      if (lead.teamId && assignee.teamId !== lead.teamId) {
-        return res
-          .status(400)
-          .json({ message: "Selected Team Lead must belong to the lead's assigned team." });
-      }
+      // Admin can assign to any active user.
     } else if (currentUser.role === "TEAM_LEAD") {
-      if (lead.teamId !== currentUser.teamId) {
-        return res.status(403).json({ message: "You can only create tasks for leads in your team." });
+      const teams = await storage.getTeams();
+      const managedTeamIds = new Set<string>();
+      teams.forEach((team) => {
+        if (team.leadId === currentUser.id) {
+          managedTeamIds.add(team.id);
+        }
+      });
+      // Fallback only when this lead is not yet configured on any team.
+      if (managedTeamIds.size === 0 && currentUser.teamId) {
+        managedTeamIds.add(currentUser.teamId);
       }
-      if (assignee.teamId !== currentUser.teamId) {
-        return res.status(403).json({ message: "You can only assign tasks to Team Leads in your team." });
+
+      if (!lead.teamId || !managedTeamIds.has(lead.teamId)) {
+        return res
+          .status(403)
+          .json({ message: "You can only create tasks for leads in your own or managed teams." });
+      }
+
+      const isSelfAssignable = assignee.id === currentUser.id;
+      const isManagedTeamMember =
+        (assignee.role === "AE" || assignee.role === "SDR") &&
+        !!assignee.teamId &&
+        managedTeamIds.has(assignee.teamId);
+      if (!isSelfAssignable && !isManagedTeamMember) {
+        return res
+          .status(403)
+          .json({ message: "You can assign tasks only to yourself or AE/SDR members of your managed teams." });
       }
     } else {
       if (lead.ownerId !== currentUser.id) {
         return res.status(403).json({ message: "You can only create tasks for your own leads." });
       }
-      if (!currentUser.teamId || assignee.teamId !== currentUser.teamId) {
-        return res.status(403).json({ message: "You can only assign tasks to your team's Team Lead." });
+      if (assignee.id !== currentUser.id) {
+        return res.status(403).json({ message: "You can assign tasks only to yourself." });
       }
     }
 
