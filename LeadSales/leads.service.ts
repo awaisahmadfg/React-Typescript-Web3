@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
-import { and, eq, sql } from "drizzle-orm";
-import { activities, activityTimeline, type Activity, type Lead, type User } from "@shared/schema";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { activities, activityTimeline, users, type Activity, type Lead, type User } from "@shared/schema";
 import { parsePhoneNumberFromString } from "libphonenumber-js";
 import { db } from "../database/db";
 import { storage } from "../database/storage";
@@ -23,9 +23,45 @@ export const leadHandlers = {
     const filters: LeadFiltersQuery = { ...(req.query as LeadFiltersQuery) };
     if (currentUser.role === "ADMIN") {
       // Admin sees all leads
-    } else if (currentUser.role === "TEAM_LEAD") {
-      filters.teamId = currentUser.teamId ?? undefined;
-    } else {
+      const leads = await storage.getLeads(filters);
+      return res.json(leads);
+    }
+
+    if (currentUser.role === "TEAM_LEAD") {
+      // Team lead sees:
+      // - own leads
+      // - leads owned by users in own team
+      // - leads owned by users in any team where they are configured as team lead
+      const teams = await storage.getTeams();
+      const managedTeamIds = new Set<string>();
+      teams.forEach((team) => {
+        if (team.leadId === currentUser.id) {
+          managedTeamIds.add(team.id);
+        }
+      });
+      // Backward-compat fallback: if no team references this lead yet, use assigned teamId.
+      if (managedTeamIds.size === 0 && currentUser.teamId) {
+        managedTeamIds.add(currentUser.teamId);
+      }
+      const managedTeamIdsList = Array.from(managedTeamIds);
+      const teamMembers =
+        managedTeamIdsList.length > 0
+          ? await db
+              .select({ id: users.id })
+              .from(users)
+              .where(inArray(users.teamId, managedTeamIdsList))
+          : [];
+      const visibleOwnerIds = new Set<string>([currentUser.id, ...teamMembers.map((member) => member.id)]);
+
+      const leads = await storage.getLeads(filters);
+      return res.json(
+        leads.filter(
+          (lead) => visibleOwnerIds.has(lead.ownerId),
+        ),
+      );
+    }
+
+    {
       // AE/SDR: only own leads
       filters.ownerId = currentUser.id;
     }
@@ -63,10 +99,6 @@ export const leadHandlers = {
 
     const normalize = (value: string | number | boolean | Date | null | undefined) =>
       String(value ?? "").trim().toLowerCase();
-    const normalizeOptional = (value: string | number | boolean | Date | null | undefined) => {
-      const v = String(value ?? "").trim();
-      return v.length > 0 ? v : null;
-    };
     const normalizeOptionalLower = (value: string | number | boolean | Date | null | undefined) => {
       const v = String(value ?? "").trim().toLowerCase();
       return v.length > 0 ? v : null;
@@ -177,9 +209,24 @@ export const leadHandlers = {
       ownerId = requestedOwnerId || currentUser.id;
       teamId = requestedTeamId || currentUser.teamId;
     } else if (currentUser.role === "TEAM_LEAD") {
-      // Team lead can create/manange only within own team
+      // Team lead can create/manage only within teams they currently lead.
+      const teams = await storage.getTeams();
+      const managedTeamIds = teams
+        .filter((team) => team.leadId === currentUser.id)
+        .map((team) => team.id);
+      const fallbackTeamId = managedTeamIds[0] || currentUser.teamId || null;
+      if (requestedTeamId && !managedTeamIds.includes(requestedTeamId)) {
+        return res
+          .status(403)
+          .json({ message: "You can only assign leads to teams you currently lead." });
+      }
       ownerId = requestedOwnerId || currentUser.id;
-      teamId = currentUser.teamId;
+      teamId = requestedTeamId || fallbackTeamId;
+      if (!teamId) {
+        return res
+          .status(400)
+          .json({ message: "No managed team is configured for your account. Contact admin." });
+      }
     } else {
       // AE/SDR can create only own leads in own team
       ownerId = currentUser.id;
