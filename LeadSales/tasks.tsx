@@ -39,6 +39,15 @@ export default function TasksPage() {
   const [newTaskDueDate, setNewTaskDueDate] = useState(format(new Date(), "yyyy-MM-dd"));
   const [newTaskNotes, setNewTaskNotes] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [isPlanEditOpen, setIsPlanEditOpen] = useState(false);
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  const [editingPlanTaskId, setEditingPlanTaskId] = useState<string | null>(null);
+  const [planEditSelectedPlanId, setPlanEditSelectedPlanId] = useState<string>("");
+  const [planEditTaskType, setPlanEditTaskType] = useState("LINKEDIN");
+  const [planEditTaskTypeOther, setPlanEditTaskTypeOther] = useState("");
+  const [planEditPriority, setPlanEditPriority] = useState<"LOW" | "MEDIUM" | "HIGH">("MEDIUM");
+  const [planEditDueDate, setPlanEditDueDate] = useState(format(new Date(), "yyyy-MM-dd"));
+  const [planEditNotes, setPlanEditNotes] = useState("");
   const [taskErrors, setTaskErrors] = useState<Record<string, string>>({});
 
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
@@ -81,6 +90,30 @@ export default function TasksPage() {
   const { data: users = [] } = useQuery<User[]>({
     queryKey: ["/api/users"],
   });
+  const { data: plans = [] } = useQuery<any[]>({
+    queryKey: ["/api/plans"],
+    enabled: !!user,
+  });
+  const { data: planTeamIdsByPlan = {} } = useQuery<Record<string, string[]>>({
+    queryKey: ["/api/plan-team-assignments", plans.length],
+    enabled: !!user && plans.length > 0,
+    queryFn: async () => {
+      const results: Record<string, string[]> = {};
+      for (const plan of plans) {
+        const res = await fetch(`/api/plans/${plan.id}/teams`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          results[plan.id] = [];
+          continue;
+        }
+        const body = (await res.json().catch(() => ({}))) as { teamIds?: string[] };
+        results[plan.id] = Array.isArray(body.teamIds) ? body.teamIds : [];
+      }
+      return results;
+    },
+  });
 
   interface TaskItem {
     id: string;
@@ -90,6 +123,8 @@ export default function TasksPage() {
     planId?: string | null;
     planName?: string | null;
     teamName?: string | null;
+    assigneeNames?: string[];
+    assigneeIds?: string[];
     leadName: string;
     assigneeName: string;
     company: string;
@@ -169,6 +204,8 @@ export default function TasksPage() {
         teamName: t.teamName ?? null,
         leadName: t.leadName || (lead ? `${lead.firstName} ${lead.lastName}` : "Unknown Lead"),
         assigneeName: assignee?.name || "Unknown User",
+        assigneeNames: Array.isArray(t.assigneeNames) ? t.assigneeNames : undefined,
+        assigneeIds: Array.isArray(t.assigneeIds) ? t.assigneeIds : undefined,
         company: t.company ?? t.teamName ?? lead?.company ?? "Unknown",
         type,
         dueDate: new Date(t.dueDate),
@@ -318,6 +355,36 @@ export default function TasksPage() {
     },
   });
 
+  const updatePlanTaskMutation = useMutation({
+    mutationFn: async (payload: {
+      taskId: string;
+      planId: string;
+      taskType: string;
+      priority: "LOW" | "MEDIUM" | "HIGH";
+      dueDate: string;
+      notes: string;
+    }) => {
+      const taskRes = await fetch(`/api/tasks/${payload.taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          planId: payload.planId,
+          type: payload.taskType,
+          priority: payload.priority,
+          dueDate: payload.dueDate,
+          notes: payload.notes || null,
+        }),
+      });
+      if (!taskRes.ok) {
+        const data = await taskRes.json().catch(() => ({}));
+        throw new Error(data?.message || "Failed to update selected task");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tasks"] });
+    },
+  });
+
   const deleteTaskMutation = useMutation({
     mutationFn: async (id: string) => {
       await apiRequest("DELETE", `/api/tasks/${id}`);
@@ -344,8 +411,60 @@ export default function TasksPage() {
   const canEditTask = (task: TaskItem) => {
     if (!user) return false;
     const creatorId = task.createdByUserId || task.userId;
-    if (user.role === Role.ADMIN || user.role === Role.TEAM_LEAD) return true;
+    if (user.role === Role.ADMIN) return true;
+    if (user.role === Role.TEAM_LEAD) {
+      const headedTeamIds = new Set(
+        teams.filter((team) => team.leadId === user.id).map((team) => team.id),
+      );
+      if (task.leadId) {
+        const taskLead = leads.find((lead) => lead.id === task.leadId);
+        return !!taskLead?.teamId && headedTeamIds.has(taskLead.teamId);
+      }
+      if (task.planId) {
+        const scopedPlanTeamIds = planTeamIdsByPlan[task.planId] ?? [];
+        return scopedPlanTeamIds.some((teamId) => headedTeamIds.has(teamId));
+      }
+      return false;
+    }
     return creatorId === user.id || task.userId === user.id;
+  };
+
+  const canEditPlanTask = (task: TaskItem) => {
+    if (!user || !task.planId) return false;
+    if (user.role === Role.ADMIN) return true;
+    if (user.role === Role.TEAM_LEAD) {
+      const headedTeamIds = new Set(
+        teams.filter((team) => team.leadId === user.id).map((team) => team.id),
+      );
+      const scopedPlanTeamIds = planTeamIdsByPlan[task.planId] ?? [];
+      return scopedPlanTeamIds.some((teamId) => headedTeamIds.has(teamId));
+    }
+    return Array.isArray(task.assigneeIds) && task.assigneeIds.includes(user.id);
+  };
+
+  const canDeleteTask = (task: TaskItem) => {
+    if (!user) return false;
+    if (user.role === Role.ADMIN) return true;
+    if (user.role === Role.TEAM_LEAD) {
+      const headedTeamIds = new Set(
+        teams.filter((team) => team.leadId === user.id).map((team) => team.id),
+      );
+      if (task.leadId) {
+        const taskLead = leads.find((lead) => lead.id === task.leadId);
+        return !!taskLead?.teamId && headedTeamIds.has(taskLead.teamId);
+      }
+      if (task.planId) {
+        const scopedPlanTeamIds = planTeamIdsByPlan[task.planId] ?? [];
+        return scopedPlanTeamIds.some((teamId) => headedTeamIds.has(teamId));
+      }
+    }
+    return false;
+  };
+
+  const canCompleteTask = (task: TaskItem) => {
+    if (!user) return false;
+    if (task.planId) return canEditPlanTask(task);
+    return canEditTask(task);
   };
 
   const resetTaskForm = () => {
@@ -380,13 +499,7 @@ export default function TasksPage() {
       });
       return;
     }
-    if (!task.leadId) {
-      toast({
-        title: "Plan task",
-        description: "This is a plan-level task and cannot be edited from lead task form.",
-      });
-      return;
-    }
+    if (!task.leadId) return;
     setEditingTaskId(task.id);
     setNewTaskLeadId(task.leadId || "");
     setSearchQuery("");
@@ -409,6 +522,32 @@ export default function TasksPage() {
     setNewTaskDueDate(format(task.dueDate, "yyyy-MM-dd"));
     setNewTaskNotes(task.notes || "");
     setIsCreateOpen(true);
+  };
+
+  const openEditPlanDialog = (task: TaskItem) => {
+    if (!task.planId) return;
+    const taskType = String(task.type || "").toLowerCase();
+    if (taskType.includes("email")) {
+      setPlanEditTaskType("EMAIL");
+      setPlanEditTaskTypeOther("");
+    } else if (taskType.includes("linkedin")) {
+      setPlanEditTaskType("LINKEDIN");
+      setPlanEditTaskTypeOther("");
+    } else if (taskType.includes("call") || taskType.includes("phone")) {
+      setPlanEditTaskType("CALL");
+      setPlanEditTaskTypeOther("");
+    } else {
+      setPlanEditTaskType("OTHER");
+      setPlanEditTaskTypeOther(task.type || "");
+    }
+    const taskPriority = String(task.priority || "MEDIUM").toUpperCase();
+    setPlanEditPriority(taskPriority === "LOW" || taskPriority === "HIGH" ? taskPriority : "MEDIUM");
+    setPlanEditDueDate(format(task.dueDate, "yyyy-MM-dd"));
+    setPlanEditNotes(task.notes || "");
+    setEditingPlanId(task.planId);
+    setEditingPlanTaskId(task.id);
+    setPlanEditSelectedPlanId(task.planId);
+    setIsPlanEditOpen(true);
   };
 
   const handleSubmitTask = () => {
@@ -486,6 +625,46 @@ export default function TasksPage() {
     );
   };
 
+  const handleSubmitPlanEdit = () => {
+    if (!editingPlanId || !editingPlanTaskId) return;
+    const resolvedTaskType =
+      planEditTaskType === "EMAIL"
+        ? "Email Follow-up"
+        : planEditTaskType === "LINKEDIN"
+          ? "LinkedIn Message"
+          : planEditTaskType === "CALL"
+            ? "Phone Call"
+            : planEditTaskTypeOther.trim();
+    updatePlanTaskMutation.mutate(
+      {
+        taskId: editingPlanTaskId,
+        planId: planEditSelectedPlanId || editingPlanId,
+        taskType: resolvedTaskType || "LinkedIn Message",
+        priority: planEditPriority,
+        dueDate: planEditDueDate,
+        notes: planEditNotes,
+      },
+      {
+        onSuccess: () => {
+          toast({
+            title: "Task Updated",
+            description: "Selected plan task has been updated.",
+          });
+          setIsPlanEditOpen(false);
+          setEditingPlanId(null);
+          setEditingPlanTaskId(null);
+        },
+        onError: (error: any) => {
+          toast({
+            title: "Error",
+            description: error?.message || "Failed to update plan.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
   const handleComplete = (task: TaskItem) => {
     updateTaskMutation.mutate(
       { id: task.id, updates: { status: "COMPLETED" } },
@@ -556,6 +735,97 @@ export default function TasksPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <Dialog
+        open={isPlanEditOpen}
+        onOpenChange={(open) => {
+          setIsPlanEditOpen(open);
+          if (!open) {
+            setEditingPlanId(null);
+            setEditingPlanTaskId(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Task</DialogTitle>
+            <DialogDescription>
+              Update task details for this plan task.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <Label>Plan</Label>
+                <Select value={planEditSelectedPlanId} onValueChange={setPlanEditSelectedPlanId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select plan" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(plans || []).map((plan) => (
+                      <SelectItem key={plan.id} value={plan.id}>
+                        {plan.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Task Type</Label>
+                <Select value={planEditTaskType} onValueChange={setPlanEditTaskType}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="EMAIL">Email Follow-up</SelectItem>
+                    <SelectItem value="LINKEDIN">LinkedIn Message</SelectItem>
+                    <SelectItem value="CALL">Phone Call</SelectItem>
+                    <SelectItem value="OTHER">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+                {planEditTaskType === "OTHER" && (
+                  <Input
+                    value={planEditTaskTypeOther}
+                    onChange={(e) => setPlanEditTaskTypeOther(e.target.value)}
+                    placeholder="Enter custom task type"
+                  />
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label>Priority</Label>
+                <Select value={planEditPriority} onValueChange={(value: "LOW" | "MEDIUM" | "HIGH") => setPlanEditPriority(value)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="LOW">Low</SelectItem>
+                    <SelectItem value="MEDIUM">Medium</SelectItem>
+                    <SelectItem value="HIGH">High</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Due Date</Label>
+                <Input
+                  type="date"
+                  value={planEditDueDate}
+                  onChange={(e) => setPlanEditDueDate(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Notes</Label>
+                <Textarea
+                  value={planEditNotes}
+                  onChange={(e) => setPlanEditNotes(e.target.value)}
+                  placeholder="What needs to be done?"
+                />
+              </div>
+            </div>
+          <DialogFooter>
+            <Button onClick={handleSubmitPlanEdit} disabled={updatePlanTaskMutation.isPending}>
+              {updatePlanTaskMutation.isPending ? "Saving..." : "Update Task"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">To-Do Tasks</h1>
@@ -780,13 +1050,13 @@ export default function TasksPage() {
                       Lead: {task.leadName} • <span className="text-xs">{task.company}</span>
                     </Link>
                   ) : (
-                    <p className="text-sm text-muted-foreground">
+                    <Link href={`/plans#planId=${task.planId}`} className="text-sm text-muted-foreground hover:underline">
                       Plan: {task.planName || task.leadName.replace(/^Plan:\s*/, "")} • <span className="text-xs">{task.teamName || task.company}</span>
-                    </p>
+                    </Link>
                   )}
-                  {user?.role === Role.ADMIN && (
+                  {(user?.role === Role.ADMIN || user?.role === Role.TEAM_LEAD || !!task.planId) && (
                     <p className="text-xs text-muted-foreground">
-                      Assignee: {task.assigneeName}
+                      Assignee: {task.assigneeNames && task.assigneeNames.length > 0 ? task.assigneeNames.join(", ") : task.assigneeName}
                     </p>
                   )}
                 </div>
@@ -808,17 +1078,26 @@ export default function TasksPage() {
                   </div>
                   <p className="text-xs text-muted-foreground">Due Date</p>
                 </div>
-                <Button size="sm" onClick={() => handleComplete(task)}>
-                  Complete
-                </Button>
+                {canCompleteTask(task) && (
+                  <Button size="sm" onClick={() => handleComplete(task)}>
+                    Complete
+                  </Button>
+                )}
                 {task.leadId && canEditTask(task) && (
                   <Button size="sm" variant="ghost" onClick={() => openEditTaskDialog(task)}>
                     <Pencil className="w-4 h-4" />
                   </Button>
                 )}
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => setDeleteTarget(task)}>
-                  <Trash2 className="w-4 h-4" />
-                </Button>
+                {!task.leadId && !!task.planId && canEditPlanTask(task) && (
+                  <Button size="sm" variant="ghost" onClick={() => openEditPlanDialog(task)}>
+                    <Pencil className="w-4 h-4" />
+                  </Button>
+                )}
+                {canDeleteTask(task) && (
+                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => setDeleteTarget(task)}>
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                )}
               </div>
             </CardContent>
           </Card>
