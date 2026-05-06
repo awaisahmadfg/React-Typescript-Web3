@@ -13,6 +13,7 @@ import {
   users,
   teams,
   plans,
+  planTeams,
   leads,
   activities,
   goals,
@@ -21,9 +22,17 @@ import {
   clients,
   clientInvoiceEntries,
   clientInvoiceEntryHistory,
+  activityTimeline,
+  userTeams,
+  LinkedinProfile,
+  InsertLinkedinProfile,
+  EmailAccount,
+  InsertEmailAccount,
+  linkedinProfiles,
+  emailAccounts,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, inArray } from "drizzle-orm";
 
 export interface IStorage {
   // Users
@@ -39,6 +48,10 @@ export interface IStorage {
   updateTeam(id: string, updates: Partial<Team>): Promise<Team>;
   deleteTeam(id: string): Promise<void>;
   assignUserToTeam(userId: string, teamId: string | null): Promise<User>;
+  getUserTeamIds(userId: string): Promise<string[]>;
+  addUserToTeam(userId: string, teamId: string): Promise<void>;
+  removeUserFromTeam(userId: string, teamId: string): Promise<void>;
+  getTeamMemberIds(teamId: string): Promise<string[]>;
 
   // Plans
   getPlans(): Promise<Plan[]>;
@@ -48,11 +61,15 @@ export interface IStorage {
   deletePlan(id: string): Promise<void>;
   getPlanAssignments(planId: string): Promise<{ userId: string }[]>;
   setPlanAssignments(planId: string, userIds: string[]): Promise<void>;
+  getPlanTeamIds(planId: string): Promise<string[]>;
+  getTeamPlanIds(teamId: string): Promise<string[]>;
+  setPlanTeams(planId: string, teamIds: string[]): Promise<void>;
 
   // Leads
   getLeads(filters: any): Promise<Lead[]>;
   createLead(lead: any): Promise<Lead>;
   updateLead(id: string, updates: Partial<Lead>): Promise<Lead>;
+  deleteLead(id: string): Promise<void>;
 
   // Activities
   getActivities(filters: any): Promise<Activity[]>;
@@ -82,10 +99,26 @@ export interface IStorage {
   updateClientInvoiceEntry(id: string, updates: Partial<ClientInvoiceEntry>): Promise<ClientInvoiceEntry>;
   getClientInvoiceEntryHistory(clientId: string): Promise<ClientInvoiceEntryHistory[]>;
   createClientInvoiceEntryHistory(entry: any): Promise<ClientInvoiceEntryHistory>;
+
+  // LinkedIn Profiles
+  getLinkedinProfiles(userIds?: string[]): Promise<LinkedinProfile[]>;
+  getLinkedinProfile(id: string): Promise<LinkedinProfile | undefined>;
+  createLinkedinProfile(data: InsertLinkedinProfile): Promise<LinkedinProfile>;
+  updateLinkedinProfile(id: string, updates: Partial<LinkedinProfile>): Promise<LinkedinProfile>;
+  deleteLinkedinProfile(id: string): Promise<void>;
+
+  // Email Accounts
+  getEmailAccounts(userIds?: string[]): Promise<EmailAccount[]>;
+  getEmailAccount(id: string): Promise<EmailAccount | undefined>;
+  createEmailAccount(data: InsertEmailAccount): Promise<EmailAccount>;
+  updateEmailAccount(id: string, updates: Partial<EmailAccount>): Promise<EmailAccount>;
+  deleteEmailAccount(id: string): Promise<void>;
+
+  getUsers(): Promise<User[]>;
 }
 
 export class DatabaseStorage implements IStorage {
-  /** "Active" if last stage change (or lead creation) is within the last 2 months. */
+  /** “Active” if last stage change (or lead creation) is within the last 2 months. */
   private isLeadWithinActiveWindow(lead: Lead): boolean {
     const anchorRaw = lead.statusChangedAt ?? lead.createdAt;
     if (!anchorRaw) return false;
@@ -101,7 +134,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.username, username));
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(sql`${users.email} = ${username} OR ${users.username} = ${username}`);
     return user;
   }
 
@@ -139,7 +175,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTeam(id: string): Promise<void> {
-    // Clear team assignment for users in this team, then delete the team
+    // Clear junction table and legacy field, then delete the team
+    await db.delete(userTeams).where(eq(userTeams.teamId, id));
     await db.update(users).set({ teamId: null }).where(eq(users.teamId, id));
     await db.delete(teams).where(eq(teams.id, id));
   }
@@ -158,8 +195,13 @@ export class DatabaseStorage implements IStorage {
         name: row.name,
         ownerId: row.owner_id,
         initialContactsPerDay: 0,
+        taskScheduleStartDate: new Date().toISOString().slice(0, 10),
+        emailTaskCount: 4,
+        linkedinTaskCount: 4,
+        callTaskCount: 4,
         emailDelayDays: 3,
         messageDelayDays: 2,
+        callDelayDays: 0,
         initialContactChannel: "LinkedIn",
         isActive: true,
         createdAt: row.created_at,
@@ -189,8 +231,13 @@ export class DatabaseStorage implements IStorage {
         name: row.name,
         ownerId: row.owner_id,
         initialContactsPerDay: 0,
+        taskScheduleStartDate: new Date().toISOString().slice(0, 10),
+        emailTaskCount: 4,
+        linkedinTaskCount: 4,
+        callTaskCount: 4,
         emailDelayDays: 3,
         messageDelayDays: 2,
+        callDelayDays: 0,
         initialContactChannel: "LinkedIn",
         isActive: true,
         createdAt: row.created_at,
@@ -233,8 +280,13 @@ export class DatabaseStorage implements IStorage {
         name: row.name,
         ownerId: row.owner_id,
         initialContactsPerDay: 0,
+        taskScheduleStartDate: new Date().toISOString().slice(0, 10),
+        emailTaskCount: 4,
+        linkedinTaskCount: 4,
+        callTaskCount: 4,
         emailDelayDays: 3,
         messageDelayDays: 2,
+        callDelayDays: 0,
         initialContactChannel: "LinkedIn",
         isActive: true,
         createdAt: row.created_at,
@@ -242,8 +294,39 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async getPlanTeamIds(planId: string): Promise<string[]> {
+    try {
+      const rows = await db.select().from(planTeams).where(eq(planTeams.planId, planId));
+      return rows.map((r) => r.teamId);
+    } catch {
+      return [];
+    }
+  }
+
+  async getTeamPlanIds(teamId: string): Promise<string[]> {
+    try {
+      const rows = await db.select().from(planTeams).where(eq(planTeams.teamId, teamId));
+      return rows.map((r) => r.planId);
+    } catch {
+      return [];
+    }
+  }
+
+  async setPlanTeams(planId: string, teamIds: string[]): Promise<void> {
+    try {
+      await db.delete(planTeams).where(eq(planTeams.planId, planId));
+      if (teamIds.length === 0) return;
+      await db.insert(planTeams).values(teamIds.map((teamId) => ({ planId, teamId })));
+    } catch {
+      // no-op if table not present yet
+    }
+  }
+
   async deletePlan(id: string): Promise<void> {
+    // Remove all plan-linked tasks (manual + auto-generated) before deleting the plan.
+    await db.delete(tasks).where(eq(tasks.planId, id));
     await db.delete(planAssignments).where(eq(planAssignments.planId, id));
+    try { await db.delete(planTeams).where(eq(planTeams.planId, id)); } catch { /* ignore */ }
     await db.delete(plans).where(eq(plans.id, id));
   }
 
@@ -254,6 +337,7 @@ export class DatabaseStorage implements IStorage {
     if (filters.ownerId) conditions.push(eq(leads.ownerId, filters.ownerId));
     if (filters.teamId) conditions.push(eq(leads.teamId, filters.teamId));
     if (filters.planId) conditions.push(eq(leads.planId, filters.planId));
+    if (filters.stage) conditions.push(eq(leads.stage, filters.stage));
 
     const rows = conditions.length > 0 ? await query.where(and(...conditions)) : await query;
 
@@ -299,10 +383,24 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAEDashboardStats(user: User): Promise<any[]> {
-    const allUsers = await db
-      .select()
-      .from(users)
-      .where(user.role === "ADMIN" ? undefined : eq(users.teamId, user.teamId || ""));
+    let allUsers: User[];
+    if (user.role === "ADMIN") {
+      allUsers = await db.select().from(users);
+    } else {
+      const teamIds = await this.getUserTeamIds(user.id);
+      if (teamIds.length === 0) {
+        allUsers = [];
+      } else {
+        const memberIds = await db
+          .select({ userId: userTeams.userId })
+          .from(userTeams)
+          .where(inArray(userTeams.teamId, teamIds));
+        const uniqueIds = Array.from(new Set(memberIds.map((r) => r.userId)));
+        allUsers = uniqueIds.length > 0
+          ? await db.select().from(users).where(inArray(users.id, uniqueIds))
+          : [];
+      }
+    }
     const filteredUsers = allUsers.filter((u) => u.role === "AE" || u.role === "SDR");
 
     const stats = await Promise.all(
@@ -378,12 +476,52 @@ export class DatabaseStorage implements IStorage {
   }
 
   async assignUserToTeam(userId: string, teamId: string | null): Promise<User> {
+    // Legacy wrapper: update users.teamId and sync junction table
     const [updatedUser] = await db
       .update(users)
       .set({ teamId })
       .where(eq(users.id, userId))
       .returning();
+    if (teamId) {
+      await db.insert(userTeams).values({ userId, teamId }).onConflictDoNothing();
+    }
     return updatedUser;
+  }
+
+  async getUserTeamIds(userId: string): Promise<string[]> {
+    const rows = await db
+      .select({ teamId: userTeams.teamId })
+      .from(userTeams)
+      .where(eq(userTeams.userId, userId));
+    return rows.map((r) => r.teamId);
+  }
+
+  async addUserToTeam(userId: string, teamId: string): Promise<void> {
+    await db.insert(userTeams).values({ userId, teamId }).onConflictDoNothing();
+    // Sync legacy field: set users.teamId if currently null
+    const [user] = await db.select({ teamId: users.teamId }).from(users).where(eq(users.id, userId));
+    if (!user?.teamId) {
+      await db.update(users).set({ teamId }).where(eq(users.id, userId));
+    }
+  }
+
+  async removeUserFromTeam(userId: string, teamId: string): Promise<void> {
+    await db.delete(userTeams).where(and(eq(userTeams.userId, userId), eq(userTeams.teamId, teamId)));
+    // Sync legacy field: clear users.teamId if it matched the removed team
+    const [user] = await db.select({ teamId: users.teamId }).from(users).where(eq(users.id, userId));
+    if (user?.teamId === teamId) {
+      // Set to another team if available, otherwise null
+      const remaining = await this.getUserTeamIds(userId);
+      await db.update(users).set({ teamId: remaining[0] ?? null }).where(eq(users.id, userId));
+    }
+  }
+
+  async getTeamMemberIds(teamId: string): Promise<string[]> {
+    const rows = await db
+      .select({ userId: userTeams.userId })
+      .from(userTeams)
+      .where(eq(userTeams.teamId, teamId));
+    return rows.map((r) => r.userId);
   }
 
   async getTasks(filters: any): Promise<Task[]> {
@@ -392,6 +530,7 @@ export class DatabaseStorage implements IStorage {
     if (filters.id) conditions.push(eq(tasks.id, filters.id));
     if (filters.userId) conditions.push(eq(tasks.userId, filters.userId));
     if (filters.leadId) conditions.push(eq(tasks.leadId, filters.leadId));
+    if (filters.planId) conditions.push(eq(tasks.planId, filters.planId));
     if (filters.status) conditions.push(eq(tasks.status, filters.status));
 
     if (conditions.length > 0) {
@@ -412,6 +551,13 @@ export class DatabaseStorage implements IStorage {
       .where(eq(tasks.id, id))
       .returning();
     return updatedTask;
+  }
+
+  async deleteLead(id: string): Promise<void> {
+    // Delete related records first
+    await db.delete(activityTimeline).where(eq(activityTimeline.leadId, id));
+    await db.delete(tasks).where(eq(tasks.leadId, id));
+    await db.delete(leads).where(eq(leads.id, id));
   }
 
   async deleteTask(id: string): Promise<void> {
@@ -518,6 +664,72 @@ export class DatabaseStorage implements IStorage {
   async createClientInvoiceEntryHistory(entry: any): Promise<ClientInvoiceEntryHistory> {
     const [created] = await db.insert(clientInvoiceEntryHistory).values(entry).returning();
     return created;
+  }
+
+  // ==================== LinkedIn Profiles ====================
+  async getLinkedinProfiles(userIds?: string[]): Promise<LinkedinProfile[]> {
+    if (userIds && userIds.length > 0) {
+      return await db.select().from(linkedinProfiles).where(inArray(linkedinProfiles.userId, userIds));
+    }
+    return await db.select().from(linkedinProfiles);
+  }
+
+  async getLinkedinProfile(id: string): Promise<LinkedinProfile | undefined> {
+    const [profile] = await db.select().from(linkedinProfiles).where(eq(linkedinProfiles.id, id));
+    return profile;
+  }
+
+  async createLinkedinProfile(data: InsertLinkedinProfile): Promise<LinkedinProfile> {
+    const [profile] = await db.insert(linkedinProfiles).values(data).returning();
+    return profile;
+  }
+
+  async updateLinkedinProfile(id: string, updates: Partial<LinkedinProfile>): Promise<LinkedinProfile> {
+    const [updated] = await db
+      .update(linkedinProfiles)
+      .set({ ...updates, updatedAt: sql`NOW()` })
+      .where(eq(linkedinProfiles.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteLinkedinProfile(id: string): Promise<void> {
+    await db.delete(linkedinProfiles).where(eq(linkedinProfiles.id, id));
+  }
+
+  // ==================== Email Accounts ====================
+  async getEmailAccounts(userIds?: string[]): Promise<EmailAccount[]> {
+    if (userIds && userIds.length > 0) {
+      return await db.select().from(emailAccounts).where(inArray(emailAccounts.userId, userIds));
+    }
+    return await db.select().from(emailAccounts);
+  }
+
+  async getEmailAccount(id: string): Promise<EmailAccount | undefined> {
+    const [account] = await db.select().from(emailAccounts).where(eq(emailAccounts.id, id));
+    return account;
+  }
+
+  async createEmailAccount(data: InsertEmailAccount): Promise<EmailAccount> {
+    const [account] = await db.insert(emailAccounts).values(data).returning();
+    return account;
+  }
+
+  async updateEmailAccount(id: string, updates: Partial<EmailAccount>): Promise<EmailAccount> {
+    const [updated] = await db
+      .update(emailAccounts)
+      .set({ ...updates, updatedAt: sql`NOW()` })
+      .where(eq(emailAccounts.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteEmailAccount(id: string): Promise<void> {
+    await db.delete(emailAccounts).where(eq(emailAccounts.id, id));
+  }
+  
+  async getUsers(): Promise<User[]> {
+    return await db.select().from(users);
   }
 }
 
