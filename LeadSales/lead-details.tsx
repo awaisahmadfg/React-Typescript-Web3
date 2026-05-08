@@ -41,6 +41,7 @@ type LeadTask = {
   dueDate: string;
   notes?: string | null;
   createdAt?: string;
+  updatedAt?: string;
 };
 
 export default function LeadDetailsPage() {
@@ -90,6 +91,40 @@ export default function LeadDetailsPage() {
     queryKey: [leadId ? `/api/tasks?leadId=${leadId}` : "/api/tasks"],
     enabled: !!leadId,
   });
+
+  // Scroll to a specific task or activity (or its section) when navigating
+  // via the analytics day-detail dialog. The hash can be:
+  //   #task-<id>     -> highlight a specific task
+  //   #tasks         -> scroll to Tasks section
+  //   #activity-<id> -> highlight (and auto-expand) a specific timeline event
+  //   #activities    -> scroll to Activity Journey section
+  useEffect(() => {
+    if (isLoadingLeadTasks) return;
+    if (timelineEntries.length === 0 && !leadTasks.length) {
+      // wait until at least one of the two data sources is hydrated
+    }
+    const hash = window.location.hash;
+    if (!hash) return;
+
+    // Auto-expand the targeted activity card so its full body is visible.
+    const activityMatch = hash.match(/^#activity-(.+)$/);
+    if (activityMatch) {
+      const id = activityMatch[1];
+      setExpandedItems((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+    }
+
+    const scrollTimer = setTimeout(() => {
+      const el = document.querySelector(hash);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
+      setTimeout(
+        () => el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2"),
+        2000,
+      );
+    }, 150);
+    return () => clearTimeout(scrollTimer);
+  }, [isLoadingLeadTasks, timelineEntries.length, leadTasks.length]);
 
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
@@ -1285,7 +1320,7 @@ Cycle counters - Sent: ${linkedinSentCount}, Accepted: ${linkedinAcceptedCount}`
       </div>
 
       <div className="grid md:grid-cols-3 gap-6">
-        <Card className="md:col-span-2">
+        <Card id="activities" className="md:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div>
               <CardTitle className="text-lg">Activity Journey</CardTitle>
@@ -1332,7 +1367,11 @@ Cycle counters - Sent: ${linkedinSentCount}, Accepted: ${linkedinAcceptedCount}`
                 if (item.type === "status_change") { Icon = Zap; colorClass = "bg-purple-100 text-purple-600"; }
 
                 return (
-                  <div key={item.id} className="relative flex items-start gap-4 group">
+                  <div
+                    key={item.id}
+                    id={`activity-${item.id}`}
+                    className="relative flex items-start gap-4 group scroll-mt-6 rounded-md transition-all duration-300"
+                  >
                     <div className={cn("absolute left-0 mt-0.5 ml-4 -translate-x-1/2 w-8 h-8 rounded-full border-4 border-background flex items-center justify-center z-10 shadow-sm", colorClass)}>
                       <Icon className="w-4 h-4" />
                     </div>
@@ -1601,7 +1640,7 @@ Cycle counters - Sent: ${linkedinSentCount}, Accepted: ${linkedinAcceptedCount}`
             </CardContent>
           </Card>
 
-          <Card>
+          <Card id="tasks">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Tasks</CardTitle>
               <Dialog
@@ -1781,7 +1820,7 @@ Cycle counters - Sent: ${linkedinSentCount}, Accepted: ${linkedinAcceptedCount}`
                 </div>
               ) : (
                 visibleLeadTasks.map((task) => (
-                  <div key={task.id} className="p-3 border rounded-lg bg-muted/20">
+                  <div key={task.id} id={`task-${task.id}`} className="p-3 border rounded-lg bg-muted/20 scroll-mt-6 transition-all duration-300">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-xs font-semibold">{
                         task.type === "EMAIL" ? "Email Follow-up" :
@@ -1795,10 +1834,17 @@ Cycle counters - Sent: ${linkedinSentCount}, Accepted: ${linkedinAcceptedCount}`
                       </Badge>
                     </div>
                     <div className="flex items-center justify-between mt-1 text-xs text-muted-foreground">
-                      <span className="inline-flex items-center gap-1">
-                        <CalendarClock className="w-3 h-3" />
-                        {format(parseISO(task.dueDate), "MMM d")}
-                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="inline-flex items-center gap-1">
+                          <CalendarClock className="w-3 h-3" />
+                          Due: {format(parseISO(task.dueDate), "MMM d, yyyy")}
+                        </span>
+                        {task.status === "COMPLETED" && task.updatedAt ? (
+                          <span className="inline-flex items-center gap-1 text-[10px]">
+                            Completed: {format(parseISO(task.updatedAt), "MMM d, yyyy")}
+                          </span>
+                        ) : null}
+                      </div>
                       <Badge variant="outline" className="text-[10px] px-1.5 py-0">
                         {task.priority}
                       </Badge>
