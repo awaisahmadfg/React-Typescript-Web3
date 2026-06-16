@@ -21,6 +21,9 @@ import userEvent from "@testing-library/user-event";
 import { HousingApplicationForm } from "../HousingApplicationForm";
 
 const testDoubles = vi.hoisted(() => ({
+  createdApplication: {
+    id: "application-123",
+  },
   formValues: {
     clientFullName: "John Doe",
     faithBasedPreferred: true,
@@ -33,7 +36,9 @@ const testDoubles = vi.hoisted(() => ({
     tpdHousingNeededDate: "2026-07-01",
     violenceHistoryDors: false,
   },
+  isPending: false,
   saveApplication: vi.fn(),
+  setCurrentApplication: vi.fn(),
   setCurrentFormValues: vi.fn(),
   validate: vi.fn(),
 }));
@@ -65,17 +70,27 @@ vi.mock("../pages", () => ({
 vi.mock("../../../datastores/IdahoTHStoreContext", () => ({
   useHousingApplicationsStore: () => ({
     currentApplicationId: undefined,
+    setCurrentApplication: testDoubles.setCurrentApplication,
     setCurrentFormValues: testDoubles.setCurrentFormValues,
   }),
 }));
 
 vi.mock("../../../hooks/housingApplication", () => ({
   useSaveHousingApplication: () => ({
+    isPending: testDoubles.isPending,
     mutate: testDoubles.saveApplication,
   }),
 }));
 
 describe("HousingApplicationForm", () => {
+  beforeEach(() => {
+    testDoubles.isPending = false;
+    testDoubles.saveApplication.mockReset();
+    testDoubles.setCurrentApplication.mockReset();
+    testDoubles.setCurrentFormValues.mockReset();
+    testDoubles.validate.mockReset();
+  });
+
   test("creates a new housing application when Finish is clicked", async () => {
     const user = userEvent.setup();
 
@@ -101,5 +116,43 @@ describe("HousingApplicationForm", () => {
       },
       { onSuccess: expect.any(Function) },
     );
+  });
+
+  test("opens review only after the housing application save succeeds", async () => {
+    const user = userEvent.setup();
+    const onReview = vi.fn();
+
+    render(<HousingApplicationForm onReview={onReview} />);
+
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+
+    expect(onReview).not.toHaveBeenCalled();
+
+    const [, mutationOptions] = testDoubles.saveApplication.mock.calls[0] as [
+      unknown,
+      { onSuccess: (application: unknown) => void },
+    ];
+
+    mutationOptions.onSuccess(testDoubles.createdApplication);
+
+    expect(testDoubles.setCurrentApplication).toHaveBeenCalledWith(
+      testDoubles.createdApplication,
+    );
+    expect(onReview).toHaveBeenCalledTimes(1);
+  });
+
+  test("shows Saving and disables Finish while the application is saving", async () => {
+    const user = userEvent.setup();
+    testDoubles.isPending = true;
+
+    render(<HousingApplicationForm />);
+
+    const finishButton = screen.getByRole("button", { name: "Saving…" });
+
+    expect(finishButton).toBeDisabled();
+
+    await user.click(finishButton);
+
+    expect(testDoubles.saveApplication).not.toHaveBeenCalled();
   });
 });
