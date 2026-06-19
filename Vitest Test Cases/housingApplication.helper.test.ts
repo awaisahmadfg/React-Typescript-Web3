@@ -16,13 +16,42 @@
 // =============================================================================
 
 import {
+  ApplicationStage,
+  ApplicationStatus,
+  ApplicationSubStage,
+} from "~@idaho-th/prisma/client";
+import {
+  createHousingApplication,
   getProviderApplications,
   getProvidersWithEligibility,
+  sendApplicationToProviders,
 } from "~@idaho-th/trpc/routes/housingApplication/housingApplication.helpers";
-import type { HousingProvider } from "~@idaho-th/trpc/routes/housingApplication/housingApplication.services/eligibilityEngine";
-import type { EligibilityParams } from "~@idaho-th/trpc/routes/housingApplication/housingApplication.types";
+import type {
+  CreateHousingApplicationInput,
+  EligibilityParams,
+} from "~@idaho-th/trpc/routes/housingApplication/housingApplication.types";
+import type { HousingProvider } from "~@idaho-th/trpc/routes/housingApplication/services/eligibilityEngine";
 
 vi.mock("~@idaho-th/prisma/client", () => ({
+  ApplicationStage: {
+    APPLICATION: "APPLICATION",
+  },
+  ApplicationStatus: {
+    ACTION_NEEDED: "ACTION_NEEDED",
+    WAITING: "WAITING",
+  },
+  ApplicationSubStage: {
+    INFO_NEEDED: "INFO_NEEDED",
+    PROVIDER_REVIEW: "PROVIDER_REVIEW",
+  },
+  InfoRequestSenderType: {
+    PROVIDER: "PROVIDER",
+    STAFF: "STAFF",
+  },
+  InfoRequestStatus: {
+    CLOSED: "CLOSED",
+    OPEN: "OPEN",
+  },
   Prisma: {
     join: vi.fn(),
     sql: vi.fn(),
@@ -38,13 +67,41 @@ vi.mock("~@idaho-th/trpc/services/documentAI", () => ({
 const findManyHousingProviders = vi.fn();
 const countProviderHousingApplications = vi.fn();
 const findManyProviderHousingApplications = vi.fn();
+const findFirstStaffHousingApplication = vi.fn();
+const findManyEligibleHousingProviders = vi.fn();
+const createHousingApplicationRecord = vi.fn();
+const createManyProviderHousingApplications = vi.fn();
+const updateHousingApplication = vi.fn();
+const updateStaffHousingApplication = vi.fn();
+const transaction = vi.fn();
+const transactionClient = {
+  housingApplication: {
+    update: updateHousingApplication,
+  },
+  providerHousingApplication: {
+    createMany: createManyProviderHousingApplications,
+  },
+  staffHousingApplication: {
+    update: updateStaffHousingApplication,
+  },
+};
 const prisma = {
+  $transaction: transaction,
+  eligibleHousingProvider: {
+    findMany: findManyEligibleHousingProviders,
+  },
+  housingApplication: {
+    create: createHousingApplicationRecord,
+  },
   housingProvider: {
     findMany: findManyHousingProviders,
   },
   providerHousingApplication: {
     count: countProviderHousingApplications,
     findMany: findManyProviderHousingApplications,
+  },
+  staffHousingApplication: {
+    findFirst: findFirstStaffHousingApplication,
   },
 } as unknown as Parameters<typeof getProviderApplications>[0];
 
@@ -56,6 +113,9 @@ const baseProvider = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  transaction.mockImplementation(async (callback) =>
+    callback(transactionClient),
+  );
 });
 
 describe("getProvidersWithEligibility", () => {
@@ -203,12 +263,318 @@ describe("getProviderApplications", () => {
       },
     });
     expect(findManyProviderHousingApplications).toHaveBeenCalledWith({
-      include: { application: true },
+      include: {
+        application: {
+          select: {
+            clientName: true,
+            expectedReleaseDate: true,
+            id: true,
+            idocNumber: true,
+            updatedAt: true,
+          },
+        },
+      },
       orderBy: { application: { createdAt: "desc" } },
       take: 8,
       where: {
         provider: { pseudonymizedId: "logged-in-provider" },
       },
     });
+  });
+});
+
+describe("createHousingApplication", () => {
+  test("creates the housing application with form data, staff application, expected release date, and eligible providers", async () => {
+    const formData: CreateHousingApplicationInput["formData"] = {
+      accommodations: [],
+      accommodationsInfo: null,
+      addictions: null,
+      additionalMedicalInfo: null,
+      age: null,
+      benefitsDuration: null,
+      benefitsReinstatementDate: null,
+      child1Info: null,
+      child2Info: null,
+      child3Info: null,
+      childFamilyServicesDocumentation: [],
+      childVisitationInfo: null,
+      childVisitationRequired: null,
+      clientFullName: "James H. Crumble",
+      cmPoEmail: null,
+      cmPoName: null,
+      cmPoPhone: null,
+      contagiousDisease: null,
+      currentFacilityLocation: null,
+      dob: null,
+      emergencyContactName: null,
+      emergencyContactPhone: null,
+      emergencyContactRelationship: null,
+      employer: null,
+      employerContact: null,
+      employmentOnRelease: null,
+      faithBasedPreferred: null,
+      faithBasedProviderInfo: null,
+      gender: "Male",
+      housingProbationParoleAtRelease: null,
+      idocNumber: "810412",
+      idsOnFile: [],
+      lastUseDate: null,
+      legalBackupForIcOrIce: null,
+      legalCountyOfCrime: null,
+      legalCurrentStatus: null,
+      legalMostRecentConviction: null,
+      legalSexOffenderRegistry: null,
+      medicalAccommodations: [],
+      medicalMhSupportNeeded: null,
+      militaryService: null,
+      otherAccommodations: null,
+      otherMedicalAccommodation: null,
+      parentGuardianNames: null,
+      paroleHearingCompleted: null,
+      personalPhoneNumber: null,
+      prescribedMedications: null,
+      preferredDistrict: ["D3"],
+      preferredProviders: [],
+      previousHomeCity: null,
+      previousHomeName: null,
+      previousTransitionalHome: null,
+      priorInvoluntaryDischarge: null,
+      signatureDate: null,
+      signatureProvided: null,
+      ssi90DayCarePlan: null,
+      ssiSsdiSsrbMedicareMedicaid: null,
+      ssnLast4: null,
+      substances: null,
+      tpdHousingNeededDate: "2026-06-18",
+      underInfluenceAtCrime: null,
+      vaEnrolled: null,
+      vehicleOnSite: null,
+      violenceDischargeDescription: null,
+      violenceHistoryDors: null,
+    };
+    const eligibleProvider = {
+      ...baseProvider,
+      id: "provider-1",
+      locations: [
+        {
+          acceptedGenders: ["MALE"],
+          acceptsRiders: true,
+          acceptsSexOffenders: false,
+          acceptsViolentCriminals: false,
+          district: "D3",
+          faithBased: false,
+          id: "provider-location-1",
+        },
+      ],
+      name: "208 Property Management (TVH)",
+    };
+    createHousingApplicationRecord.mockResolvedValue({
+      id: "application-123",
+    });
+    findManyHousingProviders.mockResolvedValue([eligibleProvider]);
+
+    const input: CreateHousingApplicationInput = {
+      eligibilityParams: {
+        faithBasedPreferred: null,
+        gender: "Male",
+        hasViolenceHistory: false,
+        isRider: true,
+        isSexOffender: false,
+        preferredDistricts: ["D3"],
+        preferredProviders: [],
+      },
+      formData,
+    };
+
+    await createHousingApplication(prisma, "staff-123", input);
+
+    expect(findManyHousingProviders).toHaveBeenCalledWith({
+      include: { locations: true },
+      orderBy: { name: "asc" },
+      where: expect.any(Object),
+    });
+    expect(createHousingApplicationRecord).toHaveBeenCalledWith({
+      data: {
+        clientName: "James H. Crumble",
+        eligibleProviders: {
+          create: [
+            {
+              providerId: "provider-1",
+              providerLocationId: "provider-location-1",
+            },
+          ],
+        },
+        expectedReleaseDate: new Date("2026-06-18"),
+        formData,
+        idocNumber: "810412",
+        staffApplication: {
+          create: { staffPseudonymizedId: "staff-123" },
+        },
+        stateCode: "US_ID",
+      },
+      include: {
+        eligibleProviders: {
+          include: {
+            provider: true,
+            providerLocation: true,
+          },
+        },
+        staffApplication: true,
+      },
+    });
+  });
+});
+
+describe("sendApplicationToProviders", () => {
+  test("creates provider application records for eligible providers", async () => {
+    findFirstStaffHousingApplication.mockResolvedValue({
+      id: "staff-application",
+    });
+    findManyEligibleHousingProviders.mockResolvedValue([
+      {
+        providerId: "provider-1",
+        providerLocationId: "provider-location-1",
+      },
+      {
+        providerId: "provider-2",
+        providerLocationId: "provider-location-2",
+      },
+    ]);
+
+    await sendApplicationToProviders(prisma, "staff-123", {
+      applicationId: "application-123",
+      providerIds: ["provider-1", "provider-2"],
+    });
+
+    expect(findFirstStaffHousingApplication).toHaveBeenCalledWith({
+      where: {
+        applicationId: "application-123",
+        staffPseudonymizedId: "staff-123",
+      },
+      select: { id: true },
+    });
+    expect(findManyEligibleHousingProviders).toHaveBeenCalledWith({
+      where: {
+        applicationId: "application-123",
+        providerId: { in: ["provider-1", "provider-2"] },
+      },
+      select: { providerId: true, providerLocationId: true },
+    });
+    expect(createManyProviderHousingApplications).toHaveBeenCalledWith({
+      data: [
+        {
+          applicationId: "application-123",
+          providerId: "provider-1",
+          providerLocationId: "provider-location-1",
+          stage: ApplicationStage.APPLICATION,
+          status: ApplicationStatus.ACTION_NEEDED,
+          subStage: ApplicationSubStage.PROVIDER_REVIEW,
+        },
+        {
+          applicationId: "application-123",
+          providerId: "provider-2",
+          providerLocationId: "provider-location-2",
+          stage: ApplicationStage.APPLICATION,
+          status: ApplicationStatus.ACTION_NEEDED,
+          subStage: ApplicationSubStage.PROVIDER_REVIEW,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    expect(updateHousingApplication).toHaveBeenCalledWith({
+      where: { id: "application-123" },
+      data: { sentToProvidersAt: expect.any(Date) },
+    });
+    expect(updateStaffHousingApplication).toHaveBeenCalledWith({
+      where: {
+        applicationId: "application-123",
+        staffPseudonymizedId: "staff-123",
+      },
+      data: {
+        stage: ApplicationStage.APPLICATION,
+        status: ApplicationStatus.WAITING,
+        subStage: ApplicationSubStage.PROVIDER_REVIEW,
+      },
+    });
+  });
+
+  test("does not create duplicate provider application records when sent twice", async () => {
+    findFirstStaffHousingApplication.mockResolvedValue({
+      id: "staff-application",
+    });
+    findManyEligibleHousingProviders.mockResolvedValue([
+      {
+        providerId: "provider-1",
+        providerLocationId: "provider-location-1",
+      },
+    ]);
+
+    await sendApplicationToProviders(prisma, "staff-123", {
+      applicationId: "application-123",
+      providerIds: ["provider-1"],
+    });
+    await sendApplicationToProviders(prisma, "staff-123", {
+      applicationId: "application-123",
+      providerIds: ["provider-1"],
+    });
+
+    expect(createManyProviderHousingApplications).toHaveBeenCalledTimes(2);
+    expect(createManyProviderHousingApplications).toHaveBeenNthCalledWith(1, {
+      data: [
+        {
+          applicationId: "application-123",
+          providerId: "provider-1",
+          providerLocationId: "provider-location-1",
+          stage: ApplicationStage.APPLICATION,
+          status: ApplicationStatus.ACTION_NEEDED,
+          subStage: ApplicationSubStage.PROVIDER_REVIEW,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    expect(createManyProviderHousingApplications).toHaveBeenNthCalledWith(2, {
+      data: [
+        {
+          applicationId: "application-123",
+          providerId: "provider-1",
+          providerLocationId: "provider-location-1",
+          stage: ApplicationStage.APPLICATION,
+          status: ApplicationStatus.ACTION_NEEDED,
+          subStage: ApplicationSubStage.PROVIDER_REVIEW,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  test("rejects when staff does not own the application", async () => {
+    findFirstStaffHousingApplication.mockResolvedValue(null);
+
+    await expect(
+      sendApplicationToProviders(prisma, "staff-123", {
+        applicationId: "application-123",
+        providerIds: ["provider-1"],
+      }),
+    ).rejects.toThrow("Not authorized to send this application");
+    expect(findManyEligibleHousingProviders).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  test("rejects when selected providers are not eligible", async () => {
+    findFirstStaffHousingApplication.mockResolvedValue({
+      id: "staff-application",
+    });
+    findManyEligibleHousingProviders.mockResolvedValue([]);
+
+    await expect(
+      sendApplicationToProviders(prisma, "staff-123", {
+        applicationId: "application-123",
+        providerIds: ["provider-1"],
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "No eligible providers found for the selected provider IDs",
+    });
+    expect(transaction).not.toHaveBeenCalled();
   });
 });
