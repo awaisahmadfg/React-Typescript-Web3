@@ -90,12 +90,12 @@ describe("App", () => {
     try {
       render(<App />);
 
-        expect(
-          screen.getByText(
-            "Something went wrong. Please refresh the page and try again.",
-          ),
-        ).toBeTruthy();
-        expect(screen.queryByText("Provider applications")).toBeNull();
+      expect(
+        screen.getByText(
+          "Something went wrong. Please refresh the page and try again.",
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByText("Provider applications")).toBeNull();
     } finally {
       consoleError.mockRestore();
     }
