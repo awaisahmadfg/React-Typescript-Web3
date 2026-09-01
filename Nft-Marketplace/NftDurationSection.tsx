@@ -19,11 +19,6 @@ import {
 import { handleDurationSelect } from './utils';
 import { useIsMediumScreen } from 'theme';
 
-interface NftDurationSectionProps {
-  localDispatch: Dispatch<NftDetailAction>;
-  nftDetailState: NftDetailState;
-}
-
 export const NftDurationSection: React.FC<NftDurationSectionProps> = ({
   localDispatch,
   nftDetailState
