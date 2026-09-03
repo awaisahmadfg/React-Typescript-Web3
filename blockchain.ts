@@ -1,8 +1,7 @@
 import { checkBalanceAndToast } from 'components/NftCard/utils';
 import Config from 'config/config';
-import IdeaCoinABI from 'contract/IdeaCoins.json';
-import MarketplaceAbi from 'contract/IdeaMarketplace.json';
-import NftAbi from 'contract/IdeaNft.json';
+import RoyaltyCoinABI from 'contract/RoyaltyCoin.json';
+import MarketplaceAbi from 'contract/PatentMarketplace.json';
 import { BigNumber, ethers } from 'ethers';
 import { toastify } from 'pages/newContests/toastify';
 import Actions from 'redux-state/actions';
@@ -12,10 +11,22 @@ import {
   CURRENCIES,
   ERRORS,
   NUMBERS,
+  RESOURCE,
   VARIANT
 } from 'utilities/constants';
 import { CustomError } from './CustomError';
+import {
+  auctionCache,
+  ethBalanceCache,
+  ideaBalanceCache,
+  usdtBalanceCache,
+  withRpcCache
+} from './rpcCache';
 import dataProvider from 'dataPrvider';
+import { workplaceFilter } from 'helpers/userTagsCache';
+
+export { formatRoyaltyFull, formatRoyaltyShort } from './formatRoyalty';
+export { convertEthToUsd, convertUsdToEth } from './exchangeRates';
 import {
   setAcceptNftLoading,
   setAcceptTableLoading,
@@ -29,13 +40,15 @@ import {
 import { Profile } from 'components/CardProfile';
 import { Tag } from 'interface/common';
 
-export const provider = new ethers.providers.JsonRpcProvider(Config.INFURA_URL);
-const wallet = new ethers.Wallet(Config.PRIVATE_KEY, provider);
+export const provider = new ethers.providers.StaticJsonRpcProvider(
+  Config.INFURA_URL
+);
+export const mindMinerOpsWalletAddress = Config.MINDMINER_OPS_WALLET_ADDRESS;
 
 const ideaCoinContract = new ethers.Contract(
   Config.IDEACOIN_CONTRACT_ADDRESS,
-  IdeaCoinABI,
-  wallet
+  RoyaltyCoinABI,
+  provider
 );
 
 interface Rates {
@@ -68,22 +81,26 @@ export const CHAINS_CONFIG = {
   [mainnet.chainId]: mainnet
 };
 
-const nftContract = new ethers.Contract(
-  Config.NFT_CONTRACT_ADDRESS,
-  NftAbi,
-  wallet
-);
-
 const marketplaceContract = new ethers.Contract(
   Config.MARKETPLACE_CONTRACT_ADDRESS,
   MarketplaceAbi,
-  wallet
+  provider
 );
 
 const DISPLAY_TIME = 2500;
 
+const fetchAuctionDataCached = (auctionId: string) =>
+  withRpcCache(auctionCache, String(auctionId), async () => {
+    const ideaMarketplaceContract = new ethers.Contract(
+      Config.MARKETPLACE_CONTRACT_ADDRESS,
+      MarketplaceAbi,
+      provider
+    );
+    return ideaMarketplaceContract.auction(auctionId);
+  });
+
 export const getOwnedNfts = async (address: string) => {
-  const nfts = await nftContract.balanceOf(address);
+  const nfts = await marketplaceContract.balanceOf(address);
   return nfts.toNumber();
 };
 
@@ -107,9 +124,16 @@ export const calculateGasFee = async (gasEstimate) => {
   }
 };
 
-export const estimateGasForNft = async (tokenURI: string) => {
+export const estimateGasForNft = async (
+  recipientAddress: string,
+  tokenURI: string
+) => {
   try {
-    const gasEstimate = await nftContract.estimateGas.mintNFT(tokenURI);
+    const gasEstimate = await marketplaceContract.estimateGas.mintPatentToken(
+      recipientAddress,
+      tokenURI,
+      { from: mindMinerOpsWalletAddress }
+    );
     const gasFeeEther = await calculateGasFee(gasEstimate);
     return gasFeeEther;
   } catch (error) {
@@ -119,8 +143,9 @@ export const estimateGasForNft = async (tokenURI: string) => {
 };
 
 export const estimateGasForApproval = async (
-  spender: string,
-  amount: BigNumber | string | number
+  fromAddress: string,
+  amount: BigNumber | string | number,
+  spender?: string
 ) => {
   try {
     let amountBN: BigNumber;
@@ -135,9 +160,11 @@ export const estimateGasForApproval = async (
       }
     }
 
+    const approveSpender = spender ?? fromAddress;
     const gasEstimate = await ideaCoinContract.estimateGas.approve(
-      spender,
-      amountBN
+      approveSpender,
+      amountBN,
+      { from: fromAddress }
     );
     const gasFeeEther = await calculateGasFee(gasEstimate);
     return gasFeeEther;
@@ -165,7 +192,7 @@ export const estimateGasForListNft = async (
     );
 
     const gasEstimate =
-      await ideaMarketplaceContract.estimateGas.listNftForFixedPrice(
+      await ideaMarketplaceContract.estimateGas.listPatentTokenForFixedPrice(
         tokenId,
         listPrice,
         nftContract,
@@ -485,12 +512,8 @@ export const checkNftExpiry = async (
   tokenIdForLoading?: string | number
 ): Promise<boolean> => {
   try {
-    const nftContractInstance = new ethers.Contract(
-      Config.NFT_CONTRACT_ADDRESS,
-      NftAbi,
-      provider
-    );
-    const expiryTime = await nftContractInstance.getNFTExpireTime(tokenId);
+    const expiryTime =
+      await marketplaceContract.getPatentTokenExpireTime(tokenId);
     const currentTimestamp = Math.floor(Date.now() / 1000);
 
     if (currentTimestamp > Number(expiryTime)) {
@@ -516,8 +539,8 @@ export const checkNftExpiry = async (
 export const getNftOwnerAddress = async (tokenId: string): Promise<string> => {
   try {
     const ideaNftContract = new ethers.Contract(
-      Config.NFT_CONTRACT_ADDRESS,
-      NftAbi,
+      Config.MARKETPLACE_CONTRACT_ADDRESS,
+      MarketplaceAbi,
       provider
     );
     const nftOwnerAddress = (
@@ -538,8 +561,8 @@ export const getNftOwnerPrivateKey = async (
   try {
     // Get the NFT owner from the blockchain
     const ideaNftContract = new ethers.Contract(
-      Config.NFT_CONTRACT_ADDRESS,
-      NftAbi,
+      Config.MARKETPLACE_CONTRACT_ADDRESS,
+      MarketplaceAbi,
       provider
     );
     const nftOwnerAddress = (
@@ -548,7 +571,7 @@ export const getNftOwnerPrivateKey = async (
 
     // Check if user has a company/tag
     const tags = await dataProvider.getList<Tag>('tags', {
-      filter: { owner: userId },
+      filter: workplaceFilter(userId),
       pagination: undefined,
       sort: undefined
     });
@@ -613,15 +636,9 @@ export const getListingOwnerAddress = async (
 export const getAuctionOwnerAddress = async (
   auctionId: string
 ): Promise<string> => {
-  const ideaMarketplaceContract = new ethers.Contract(
-    Config.MARKETPLACE_CONTRACT_ADDRESS,
-    MarketplaceAbi,
-    provider
-  );
-
   try {
-    const auctionData = await ideaMarketplaceContract.auction(auctionId);
-    const ownerAddress = auctionData.nftOwner.toLowerCase();
+    const auctionData = await fetchAuctionDataCached(auctionId);
+    const ownerAddress = auctionData.patentTokenOwner.toLowerCase();
     return ownerAddress;
   } catch (error) {
     console.error('🔴 [CANCEL AUCTION] Error fetching auction data:', error);
@@ -635,7 +652,7 @@ export const getWalletAddressForListingOwner = async (
   userWalletAddress?: string
 ): Promise<string | null> => {
   const tags = await dataProvider.getList<Tag>('tags', {
-    filter: { owner: userId },
+    filter: workplaceFilter(userId),
     pagination: undefined,
     sort: undefined
   });
@@ -670,7 +687,7 @@ export const getPrivateKeyForListingOwner = async (
   userPrivateKey: string | undefined
 ): Promise<string> => {
   const tags = await dataProvider.getList<Tag>('tags', {
-    filter: { owner: userId },
+    filter: workplaceFilter(userId),
     pagination: undefined,
     sort: undefined
   });
@@ -731,10 +748,13 @@ export const estimateGasForBuyNft = async (
     }
 
     const gasEstimate =
-      await ideaMarketplaceContract.estimateGas.buyFixedPriceNft(fixedId, {
-        value: priceData.nftPrice,
-        from: walletAddress
-      });
+      await ideaMarketplaceContract.estimateGas.buyFixedPricePatentToken(
+        fixedId,
+        {
+          value: priceData.patentTokenPrice,
+          from: walletAddress
+        }
+      );
 
     const gasFeeEther = await calculateGasFee(gasEstimate);
     return gasFeeEther;
@@ -751,7 +771,7 @@ export const buyNftTransaction = async (
   filters,
   pagination,
   user,
-  context?: 'marketplace' | 'nftDetail'
+  context?: 'marketplace' | 'nftDetail' | 'owned' | 'company'
 ) => {
   try {
     if (!walletAddress) {
@@ -780,7 +800,7 @@ export const buyNftTransaction = async (
     dispatch(
       Actions.buyNft(
         fixedId,
-        priceData.nftPrice,
+        priceData.patentTokenPrice,
         filters,
         pagination,
         user,
@@ -816,7 +836,7 @@ export const estimateGasForBidNftByAddress = async (
     currentBidder,
     auctionStartTime,
     auctionEndTime,
-    nftOwner,
+    patentTokenOwner,
     listed,
     isSold,
     tokenId
@@ -827,19 +847,16 @@ export const estimateGasForBidNftByAddress = async (
   const currentTimestamp = currentBlock.timestamp;
 
   // Get NFT expiry time
-  const nftContract = new ethers.Contract(
-    Config.NFT_CONTRACT_ADDRESS,
-    NftAbi,
-    provider
-  );
-  const expiryTime = await nftContract.getNFTExpireTime(tokenId);
+  const expiryTime =
+    await marketplaceContract.getPatentTokenExpireTime(tokenId);
 
   // Comprehensive validation checks
   const validations = {
     auctionIdValid: auctionId !== '0' && Number(auctionId) !== 0,
     auctionStarted: currentTimestamp > Number(auctionStartTime),
     auctionNotEnded: currentTimestamp < Number(auctionEndTime),
-    userNotSeller: walletAddress.toLowerCase() !== nftOwner.toLowerCase(),
+    userNotSeller:
+      walletAddress.toLowerCase() !== patentTokenOwner.toLowerCase(),
     nftListed: listed === true,
     nftNotSold: isSold === false,
     nftNotExpired: currentTimestamp <= Number(expiryTime),
@@ -939,14 +956,9 @@ export const bidNftTransactionWithWalletAddress = async (
 };
 
 export const estimateGasForCancelNft = async (
-  walletAddress: string,
   fixedId: string
-) => {
+): Promise<{ gasFeeEther: string; listingOwnerAddress: string }> => {
   try {
-    if (!walletAddress) {
-      throw new Error('Wallet address is required');
-    }
-
     const contractWithProvider = new ethers.Contract(
       Config.MARKETPLACE_CONTRACT_ADDRESS,
       MarketplaceAbi,
@@ -956,19 +968,23 @@ export const estimateGasForCancelNft = async (
     const priceData = await contractWithProvider.fixedPrice(fixedId);
 
     const tokenId = Number(priceData.tokenId);
+    const listingOwnerAddress: string = priceData.owner;
     const isExpired = await checkNftExpiry(tokenId);
     if (isExpired) {
-      return;
+      return {
+        gasFeeEther: '0',
+        listingOwnerAddress
+      };
     }
 
     const gasEstimate =
       await contractWithProvider.estimateGas.cancelListingForFixedPrice(
         fixedId,
-        { from: walletAddress }
+        { from: listingOwnerAddress }
       );
 
     const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    return { gasFeeEther, listingOwnerAddress };
   } catch (error) {
     console.error(ERRORS.CANCEL_FIXED_GAS_ESTIMATE, error);
     throw error;
@@ -976,7 +992,6 @@ export const estimateGasForCancelNft = async (
 };
 
 export const cancelNftTransaction = async (
-  walletAddress: string,
   fixedId: string,
   dispatch,
   filters,
@@ -984,23 +999,25 @@ export const cancelNftTransaction = async (
   user
 ) => {
   try {
-    if (!walletAddress) {
-      throw new Error('Wallet address is required');
+    const { gasFeeEther, listingOwnerAddress } =
+      await estimateGasForCancelNft(fixedId);
+
+    if (!listingOwnerAddress) {
+      throw new Error('Listing owner address not found on-chain');
     }
 
-    const hasSufficientBalance = await checkBalanceAndToast(walletAddress);
+    const hasSufficientBalance =
+      await checkBalanceAndToast(listingOwnerAddress);
     if (!hasSufficientBalance) {
       return;
     }
 
-    const gasFee = await estimateGasForCancelNft(walletAddress, fixedId);
-
     const userBalance = await getBalanceByType(
       ASSET_TYPES.ETHEREUM,
-      walletAddress
+      listingOwnerAddress
     );
 
-    const requiredBalance = parseFloat(gasFee) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
+    const requiredBalance = parseFloat(gasFeeEther) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
 
     if (parseFloat(String(userBalance)) < requiredBalance) {
       toastify(
@@ -1042,7 +1059,7 @@ export const cancelNftTransaction = async (
     dispatch(
       Actions.cancelFixedNft(
         fixedId,
-        priceData.nftPrice,
+        priceData.patentTokenPrice,
         filters,
         pagination,
         user
@@ -1054,15 +1071,8 @@ export const cancelNftTransaction = async (
   }
 };
 
-export const estimateGasForCancelAuctionNft = async (
-  walletAddress: string,
-  listingId: string
-) => {
+export const estimateGasForCancelAuctionNft = async (listingId: string) => {
   try {
-    if (!walletAddress) {
-      throw new Error('Wallet address is required');
-    }
-
     const contractWithProvider = new ethers.Contract(
       Config.MARKETPLACE_CONTRACT_ADDRESS,
       MarketplaceAbi,
@@ -1072,19 +1082,23 @@ export const estimateGasForCancelAuctionNft = async (
     const auctionData = await contractWithProvider.auction(listingId);
 
     const tokenId = Number(auctionData.tokenId);
+    const auctionOwnerAddress: string = auctionData.patentTokenOwner;
     const isExpired = await checkNftExpiry(tokenId);
     if (isExpired) {
-      return;
+      return {
+        gasFeeEther: '0',
+        auctionOwnerAddress
+      };
     }
 
     const gasEstimate =
       await contractWithProvider.estimateGas.cancelListingForAuction(
         listingId,
-        { from: walletAddress }
+        { from: auctionOwnerAddress }
       );
 
     const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    return { gasFeeEther, auctionOwnerAddress };
   } catch (error) {
     console.error(ERRORS.CANCEL_AUCTION_GAS_ESTIMATE, error);
     throw error;
@@ -1092,7 +1106,6 @@ export const estimateGasForCancelAuctionNft = async (
 };
 
 export const cancelNftAuctionTransaction = async (
-  walletAddress: string,
   listingId: string,
   dispatch,
   nftId: string | number,
@@ -1101,26 +1114,25 @@ export const cancelNftAuctionTransaction = async (
   user
 ) => {
   try {
-    if (!walletAddress) {
-      throw new Error('Wallet address is required');
+    const { gasFeeEther, auctionOwnerAddress } =
+      await estimateGasForCancelAuctionNft(listingId);
+
+    if (!auctionOwnerAddress) {
+      throw new Error('Auction owner address not found on-chain');
     }
 
-    const hasSufficientBalance = await checkBalanceAndToast(walletAddress);
+    const hasSufficientBalance =
+      await checkBalanceAndToast(auctionOwnerAddress);
     if (!hasSufficientBalance) {
       return;
     }
 
-    const gasFee = await estimateGasForCancelAuctionNft(
-      walletAddress,
-      listingId
-    );
-
     const userBalance = await getBalanceByType(
       ASSET_TYPES.ETHEREUM,
-      walletAddress
+      auctionOwnerAddress
     );
 
-    const requiredBalance = parseFloat(gasFee) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
+    const requiredBalance = parseFloat(gasFeeEther) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
 
     if (parseFloat(String(userBalance)) < requiredBalance) {
       toastify(
@@ -1175,6 +1187,57 @@ export const cancelNftAuctionTransaction = async (
   }
 };
 
+export type ClaimWalletResolution = {
+  walletAddress: string;
+  onChainCurrentBidder: string;
+  userWallet?: string;
+  tagWallet?: string;
+};
+
+/** Pick the user/company wallet that matches on-chain highest bidder for claim. */
+export const resolveClaimWalletForAuction = async (
+  auctionId: string,
+  options: {
+    userWalletAddress?: string;
+    tagWalletAddress?: string;
+  }
+): Promise<ClaimWalletResolution> => {
+  const auctionData = await fetchAuctionDataCached(String(auctionId));
+  const onChainCurrentBidder = auctionData.currentBidder as string;
+
+  if (
+    !onChainCurrentBidder ||
+    onChainCurrentBidder.toLowerCase() ===
+      ethers.constants.AddressZero.toLowerCase()
+  ) {
+    throw new Error('No winning bidder on-chain for this auction.');
+  }
+
+  const bidderLower = onChainCurrentBidder.toLowerCase();
+  const { userWalletAddress, tagWalletAddress } = options;
+
+  const candidates = [userWalletAddress, tagWalletAddress].filter(
+    (address): address is string => Boolean(address)
+  );
+
+  const matchedWallet = candidates.find(
+    (address) => address.toLowerCase() === bidderLower
+  );
+
+  if (!matchedWallet) {
+    throw new Error(
+      'Claim must use the wallet that placed the winning bid. Your profile and company wallets do not match the on-chain highest bidder.'
+    );
+  }
+
+  return {
+    walletAddress: matchedWallet,
+    onChainCurrentBidder,
+    userWallet: userWalletAddress,
+    tagWallet: tagWalletAddress
+  };
+};
+
 export const estimateGasForClaimNftByAddress = async (
   walletAddress: string,
   auctionId: string
@@ -1193,12 +1256,10 @@ export const estimateGasForClaimNftByAddress = async (
     return;
   }
 
-  const gasEstimate = await ideaMarketplaceContract.estimateGas.claimNft(
-    auctionId,
-    {
+  const gasEstimate =
+    await ideaMarketplaceContract.estimateGas.claimPatentToken(auctionId, {
       from: walletAddress
-    }
-  );
+    });
 
   const gasFeeEther = await calculateGasFee(gasEstimate);
   return gasFeeEther;
@@ -1254,7 +1315,7 @@ export const estimateGasForTransfer = async (
 
     const contractWithoutSigner = new ethers.Contract(
       Config.IDEACOIN_CONTRACT_ADDRESS,
-      IdeaCoinABI,
+      RoyaltyCoinABI,
       provider
     );
 
@@ -1292,7 +1353,8 @@ export const estimateGasForTransferFrom = async (
     const gasEstimate = await ideaCoinContract.estimateGas.transferFrom(
       walletAddress,
       destinationAddress,
-      amountBN
+      amountBN,
+      { from: walletAddress }
     );
     const gasFeeEther = await calculateGasFee(gasEstimate);
     return gasFeeEther;
@@ -1335,13 +1397,13 @@ export const estimateGasForListNFTApproval = async (
       throw new Error('Wallet address is required');
     }
 
-    const ideaNftContract = new ethers.Contract(
-      Config.NFT_CONTRACT_ADDRESS,
-      NftAbi,
+    const ideaMarketplaceContract = new ethers.Contract(
+      Config.MARKETPLACE_CONTRACT_ADDRESS,
+      MarketplaceAbi,
       provider
     );
 
-    const gasEstimate = await ideaNftContract.estimateGas.approve(
+    const gasEstimate = await ideaMarketplaceContract.estimateGas.approve(
       marketplaceAddress,
       tokenId,
       { from: walletAddress }
@@ -1374,7 +1436,7 @@ export const deployNftChecks = async (
     return;
   }
 
-  const gasFeeEstimate = await estimateGasForNft(tokenURI);
+  const gasFeeEstimate = await estimateGasForNft(signer.address, tokenURI);
 
   const userBalance = await getBalanceByType(ASSET_TYPES.NFT, signer.address);
 
@@ -1494,7 +1556,7 @@ export const initDeployNFT = async (
 
     let gasFeeEstimate;
     try {
-      gasFeeEstimate = await estimateGasForNft(tokenURI);
+      gasFeeEstimate = await estimateGasForNft(walletAddress, tokenURI);
     } catch (gasError) {
       console.error('Gas estimation failed:', gasError);
       toastify(
@@ -1559,11 +1621,14 @@ export const getTransactions = async (address: string, type: string) => {
 export const getBalanceByType = async (type: string, address: string) => {
   try {
     if (type === ASSET_TYPES.ETHEREUM || type === ASSET_TYPES.NFT) {
-      const ownerEthBalance = await provider.getBalance(address);
-      return ethers.utils.formatEther(ownerEthBalance);
+      const key = address.toLowerCase();
+      return withRpcCache(ethBalanceCache, key, async () => {
+        const ownerEthBalance = await provider.getBalance(address);
+        return ethers.utils.formatEther(ownerEthBalance);
+      });
     } else if (type === ASSET_TYPES.IDEACOINS) {
       const ideaCoinBalance = await getIdeaCoinBalance(address);
-      return truncateToFourDecimalPlaces(ideaCoinBalance);
+      return ideaCoinBalance;
     } else {
       throw new Error(ERRORS.INVALID_BALANCE_TYPE);
     }
@@ -1572,87 +1637,11 @@ export const getBalanceByType = async (type: string, address: string) => {
   }
 };
 
-const fetchEthToUsdRate = async (): Promise<number | undefined> => {
-  const url = Config.COINBASE_API_URL;
-  try {
-    const response = await fetch(`${url}?currency=${Constants.USD}`);
-    const data = await response.json();
-    const rateKey = Object.keys(data.data.rates).find(
-      (key) => key.toUpperCase() === Constants.ETH_SYMBOL
-    );
-
-    if (rateKey) {
-      return parseFloat(data.data.rates[rateKey]);
-    } else {
-      console.error(ERRORS.RATE_NOT_FOUND);
-      return undefined;
-    }
-  } catch (error) {
-    console.error(ERRORS.FETCHING_LIVE_PRICES, error.message);
-    return undefined;
-  }
-};
-
-export const convertEthToUsd = async (
-  ethAmount: number
-): Promise<number | undefined> => {
-  try {
-    const ethToUsdRate = await fetchEthToUsdRate();
-    return ethToUsdRate !== undefined ? ethAmount / ethToUsdRate : undefined;
-  } catch (error) {
-    console.error(ERRORS.FETCH_ETH_TO_USD_RATE);
-    return undefined;
-  }
-};
-
-const fetchUsdToEthRate = async (): Promise<number | undefined> => {
-  const url = Config.COINBASE_API_URL;
-  try {
-    const response = await fetch(`${url}?currency=${ASSET_TYPES.ETH}`);
-    const data = await response.json();
-    const rate = data.data.rates[Constants.USD];
-
-    if (rate) {
-      return parseFloat(rate);
-    } else {
-      return undefined;
-    }
-  } catch (error) {
-    console.error(ERRORS.FETCHING_LIVE_PRICES, error.message);
-    return undefined;
-  }
-};
-
-export const convertUsdToEth = async (
-  usdAmount: number
-): Promise<number | undefined> => {
-  try {
-    const usdToEthRate = await fetchUsdToEthRate();
-    if (usdToEthRate !== undefined) {
-      const res = usdAmount / usdToEthRate;
-      return parseFloat(res.toFixed(18));
-    } else {
-      console.error(ERRORS.FETCH_ETH_TO_USD_RATE);
-      return undefined;
-    }
-  } catch (error) {
-    console.error(error.message);
-    return undefined;
-  }
-};
-
 export const getMinimumBidAmount = async (
   auctionId: string
 ): Promise<number | undefined> => {
   try {
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    // Fetch auction data using existing public mapping getter
-    const auctionData = await ideaMarketplaceContract.auction(auctionId);
+    const auctionData = await fetchAuctionDataCached(auctionId);
 
     const {
       currentBidAmount,
@@ -1685,31 +1674,83 @@ export const getMinimumBidAmount = async (
 };
 
 export const formatTokenAmount = (
-  value: string | number | null | undefined
-): string => {
+  value: string | number | null | undefined,
+  showCustomDP?: number
+) => {
   if (value === null || value === undefined || value === '') return '';
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value);
 
-  let fixed = num.toFixed(18);
+  let fixed = num.toFixed(showCustomDP ?? 18);
 
-  fixed = fixed.replace(/(\.\d*?[1-9])0+$/u, '$1').replace(/\.0+$/u, '.00');
+  if (showCustomDP) {
+    fixed = fixed.replace(/(\.\d*?[1-9])0+$/u, '$1');
+  } else {
+    fixed = fixed.replace(/(\.\d*?[1-9])0+$/u, '$1').replace(/\.0+$/u, '.00');
+  }
 
   return fixed;
 };
 
 export const getOwnerEthBalance = async () => {
-  const ownerEthBalance = await provider.getBalance(wallet.address);
+  const ownerEthBalance = await provider.getBalance(mindMinerOpsWalletAddress);
   return ethers.utils.formatEther(ownerEthBalance);
+};
+
+const USDT_BALANCE_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+export const getOwnerUsdtBalance = async () => {
+  try {
+    const key = mindMinerOpsWalletAddress.toLowerCase();
+    return withRpcCache(usdtBalanceCache, key, async () => {
+      const usdtContract = new ethers.Contract(
+        Config.USDT_CONTRACT_ADDRESS,
+        USDT_BALANCE_ABI,
+        provider
+      );
+      const balance = await usdtContract.balanceOf(mindMinerOpsWalletAddress);
+      return ethers.utils.formatUnits(balance, 6);
+    });
+  } catch (error) {
+    console.error(ERRORS.FAILED_TO_CONVERT_MATIC, error);
+    return '0';
+  }
 };
 
 export const showUserIdeaBalance = async (address: string): Promise<number> => {
   try {
     const ideaCoinBalance = await getIdeaCoinBalance(address);
-    const formattedBalance = truncateToFourDecimalPlaces(ideaCoinBalance);
+    const formattedBalance =
+      typeof ideaCoinBalance === 'number'
+        ? parseFloat(ideaCoinBalance.toFixed(6))
+        : ideaCoinBalance;
     return formattedBalance;
   } catch (error) {
     console.error(ERRORS.GET_IDEA_COINS, error);
+  }
+};
+
+export const fetchIdeaCoinPriceUsd = async (
+  chainId?: number
+): Promise<number> => {
+  return dataProvider.getIdeaCoinPriceUsd(chainId);
+};
+
+export const getTotalIdeaCoinSupply = async (): Promise<number> => {
+  try {
+    const [decimals, distributedRaw] = await Promise.all([
+      ideaCoinContract.decimals(),
+      ideaCoinContract.totalRewardsDistributed()
+    ]);
+
+    const distributed = Number(
+      ethers.utils.formatUnits(distributedRaw, decimals)
+    );
+
+    return Number.isNaN(distributed) ? 0 : distributed;
+  } catch (error) {
+    console.error(ERRORS.GET_IDEA_COINS, error);
+    return 0;
   }
 };
 
@@ -1718,6 +1759,63 @@ const truncateToFourDecimalPlaces = (value: number): number => {
     return 0;
   }
   return Math.floor(value * 10000) / 10000;
+};
+
+export const getNftTitleByTokenId = async (
+  tokenId: string
+): Promise<string> => {
+  try {
+    const tokenUri = await marketplaceContract.tokenURI(tokenId);
+    let metadataUrl = tokenUri;
+    if (tokenUri.includes(`/${Constants.IPFS}/`)) {
+      const ipfsHash = tokenUri.split(`/${Constants.IPFS}/`)[1];
+      metadataUrl = `https://ipfs.io/${Constants.IPFS}/${ipfsHash}`;
+    }
+    const { name } = await fetchNftMetadata(metadataUrl);
+    return name || `NFT #${tokenId}`;
+  } catch (error) {
+    console.error('Error fetching NFT title:', error);
+    return `NFT #${tokenId}`;
+  }
+};
+
+export type NftTitleInfo = { title: string; nftId: string };
+
+export const getNftTitlesByTokenIds = async (
+  tokenIds: string[]
+): Promise<Record<string, NftTitleInfo>> => {
+  const uniqueIds = [...new Set(tokenIds)];
+  if (uniqueIds.length === 0) return {};
+  try {
+    const { data }: any = await dataProvider.getList(RESOURCE.NFTS, {
+      filter: { tokenId: { $in: uniqueIds } },
+      pagination: { page: 0, perPage: uniqueIds.length }
+    });
+    return data.reduce(
+      (
+        map: Record<string, NftTitleInfo>,
+        nft: { tokenId?: string; name?: string; id?: string }
+      ) => {
+        if (nft.tokenId) {
+          map[nft.tokenId] = {
+            title: nft.name || `NFT #${nft.tokenId}`,
+            nftId: nft.id || ''
+          };
+        }
+        return map;
+      },
+      {} as Record<string, NftTitleInfo>
+    );
+  } catch (error) {
+    console.error('Error fetching NFT titles from DB:', error);
+    return uniqueIds.reduce(
+      (map: Record<string, NftTitleInfo>, id: string) => {
+        map[id] = { title: `NFT #${id}`, nftId: '' };
+        return map;
+      },
+      {} as Record<string, NftTitleInfo>
+    );
+  }
 };
 
 export const fetchNftMetadata = async (
@@ -1781,7 +1879,7 @@ export const convertIdeaCoinsToMatic = async (
   }
 };
 
-const convertMaticToCurrency = async (maticAmount: number) => {
+const convertUsdtToCurrency = async (usdtAmount: number) => {
   try {
     const prices = await fetchLivePrices();
     const conversions = [];
@@ -1789,7 +1887,7 @@ const convertMaticToCurrency = async (maticAmount: number) => {
     for (const key in prices) {
       conversions.push({
         currency: key,
-        amount: maticAmount * prices[key]
+        amount: usdtAmount * prices[key]
       });
     }
 
@@ -1801,8 +1899,19 @@ const convertMaticToCurrency = async (maticAmount: number) => {
 
 export const getIdeaCoinBalance = async (address: string): Promise<number> => {
   try {
-    const balance = await ideaCoinContract.balanceOf(address);
-    return formatBalance(balance);
+    const key = address.toLowerCase();
+    return withRpcCache(ideaBalanceCache, key, async () => {
+      const balance = await ideaCoinContract.balanceOf(address);
+      const rawBalanceNum = formatBalance(balance);
+      const fixed6Balance = parseFloat(rawBalanceNum.toFixed(6));
+      console.log('[getIdeaCoinBalance] ideaPoints / ideaCoins balance:', {
+        address,
+        rawContractBalance: balance?.toString(),
+        formattedUnits18: rawBalanceNum,
+        fixed6Balance
+      });
+      return fixed6Balance;
+    });
   } catch (error) {
     console.error(ERRORS.ERROR_FETCHING_IDEACOIN_BALANCE, address, error);
   }
@@ -1821,8 +1930,10 @@ const fetchCurrencyData = async (
 
   try {
     let maticAmount: number;
-    if (address === wallet.address) {
-      const ownerEthBalance = await provider.getBalance(wallet.address);
+    if (address.toLowerCase() === mindMinerOpsWalletAddress.toLowerCase()) {
+      const ownerEthBalance = await provider.getBalance(
+        mindMinerOpsWalletAddress
+      );
       maticAmount = parseFloat(ethers.utils.formatEther(ownerEthBalance));
     } else {
       const ideaBalance = await getIdeaCoinBalance(address);
@@ -1834,7 +1945,7 @@ const fetchCurrencyData = async (
 
     const conversions =
       maticAmount > 0
-        ? await convertMaticToCurrency(maticAmount)
+        ? await convertUsdtToCurrency(maticAmount)
         : defaultConversions;
 
     return { maticAmount, conversions };
@@ -1852,11 +1963,11 @@ export const userCurrencyData = async (walletAddress, rewardPoolThreshold) => {
 };
 
 export const ownerCurrencyData = async (rewardPoolThreshold) => {
-  return fetchCurrencyData(wallet.address, rewardPoolThreshold);
+  return fetchCurrencyData(mindMinerOpsWalletAddress, rewardPoolThreshold);
 };
 
 export const getOriginalCreator = async (tokenId: string) => {
-  const originalCreator = await nftContract.getRoyaltyReciever(tokenId);
+  const originalCreator = await marketplaceContract.getRoyaltyReciever(tokenId);
   return originalCreator;
 };
 
@@ -1866,11 +1977,11 @@ export const getOriginalCreatorRoyalty = async (tokenId: string) => {
 };
 
 export const getCurrentBidAmount = async (tokenId: string) => {
-  const data = await marketplaceContract.auction(tokenId);
+  const data = await fetchAuctionDataCached(tokenId);
   return data.currentBidAmount;
 };
 
 export const getNftAuctionExpireTime = async (tokenId: string) => {
-  const data = await marketplaceContract.auction(tokenId);
+  const data = await fetchAuctionDataCached(tokenId);
   return data.auctionEndTime;
 };
