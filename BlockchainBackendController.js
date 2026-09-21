@@ -70,6 +70,8 @@ const {
   parseRequestBigNumber,
   ensureUsdtAllowance,
   getRoyaltyCoinOnChainBalance,
+  getUsdtOnChainBalanceForAddress,
+  getEthOnChainBalanceForAddress,
   DEFAULT_USDT_DECIMALS,
   TOKEN_DECIMALS,
 } = require('../helpers/blockchain');
@@ -82,6 +84,10 @@ const {
   executeRoyaltyCoinSwap,
 } = require('../helpers/rcSwapExecution');
 const { normalizeSlippageBps } = require('../helpers/rcSwapAmount');
+const {
+  fetchWalletTransactionsFromMoralis,
+} = require('../helpers/walletMoralis');
+const { estimateWalletSendGas } = require('../helpers/walletSendGas');
 
 // Load environment variables
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -961,6 +967,144 @@ const blockchainController = {
       return res.status(HTTP_STATUS.BAD_REQUEST).json({
         success: false,
         message: error?.message || 'Failed to fetch RoyaltyCoin balance',
+      });
+    }
+  },
+
+  getUsdtBalance: async (req, res) => {
+    try {
+      let walletAddress = req.query.walletAddress || req.user?.walletAddress;
+      if (!walletAddress) {
+        const profile = await mongoose
+          .model(MODALS.PROFILE)
+          .findOne({ _id: req.user.id })
+          .lean();
+        walletAddress = profile?.walletAddress;
+      }
+
+      if (!walletAddress || !ethers.utils.isAddress(walletAddress)) {
+        return res.status(HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+        });
+      }
+
+      const { balance, balanceRaw } =
+        await getUsdtOnChainBalanceForAddress(walletAddress);
+
+      return res.json({
+        success: true,
+        walletAddress,
+        balance,
+        balanceRaw,
+      });
+    } catch (error) {
+      console.error('[getUsdtBalance]', error?.message || error);
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: error?.message || 'Failed to fetch USDT balance',
+      });
+    }
+  },
+
+  getEthBalance: async (req, res) => {
+    try {
+      let walletAddress = req.query.walletAddress || req.user?.walletAddress;
+      if (!walletAddress) {
+        const profile = await mongoose
+          .model(MODALS.PROFILE)
+          .findOne({ _id: req.user.id })
+          .lean();
+        walletAddress = profile?.walletAddress;
+      }
+
+      if (!walletAddress || !ethers.utils.isAddress(walletAddress)) {
+        return res.status(HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+        });
+      }
+
+      const { balance, balanceRaw } =
+        await getEthOnChainBalanceForAddress(walletAddress);
+
+      return res.json({
+        success: true,
+        walletAddress,
+        balance,
+        balanceRaw,
+      });
+    } catch (error) {
+      console.error('[getEthBalance]', error?.message || error);
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: error?.message || 'Failed to fetch ETH balance',
+      });
+    }
+  },
+
+  getWalletTransactions: async (req, res) => {
+    try {
+      const walletAddress = req.query.walletAddress;
+      const assetType = req.query.assetType;
+
+      if (!walletAddress || !ethers.utils.isAddress(walletAddress)) {
+        return res.status(HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: ERRORS.WALLET_ADDRESS_NOT_FOUND,
+        });
+      }
+
+      if (!assetType) {
+        return res.status(HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'assetType is required',
+        });
+      }
+
+      const data = await fetchWalletTransactionsFromMoralis(
+        walletAddress,
+        assetType,
+      );
+
+      return res.json({ success: true, ...data });
+    } catch (error) {
+      console.error('[getWalletTransactions]', error?.message || error);
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: error?.message || 'Failed to fetch wallet transactions',
+      });
+    }
+  },
+
+  estimateSendGas: async (req, res) => {
+    try {
+      const { walletAddress, assetType, transactionType, to, amount } =
+        req.body || {};
+
+      let fromAddress = walletAddress || req.user?.walletAddress;
+      if (!fromAddress) {
+        const profile = await mongoose
+          .model(MODALS.PROFILE)
+          .findOne({ _id: req.user.id })
+          .lean();
+        fromAddress = profile?.walletAddress;
+      }
+
+      const gasFeeEther = await estimateWalletSendGas({
+        walletAddress: fromAddress,
+        assetType,
+        transactionType,
+        to,
+        amount,
+      });
+
+      return res.json({ success: true, gasFeeEther });
+    } catch (error) {
+      console.error('[estimateSendGas]', error?.message || error);
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        message: error?.message || 'Failed to estimate gas',
       });
     }
   },
