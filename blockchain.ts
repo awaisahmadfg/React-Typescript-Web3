@@ -1,32 +1,32 @@
 import { checkBalanceAndToast } from 'components/NftCard/utils';
 import Config from 'config/config';
-import RoyaltyCoinABI from 'contract/RoyaltyCoin.json';
-import MarketplaceAbi from 'contract/PatentMarketplace.json';
 import { BigNumber, ethers } from 'ethers';
-import { toastify } from 'pages/newContests/toastify';
+import { showToast } from 'components/common/Toast';
 import Actions from 'redux-state/actions';
 import {
   ASSET_TYPES,
   Constants,
-  CURRENCIES,
   ERRORS,
   NUMBERS,
   RESOURCE,
   VARIANT
 } from 'utilities/constants';
 import { CustomError } from './CustomError';
-import {
-  auctionCache,
-  ethBalanceCache,
-  ideaBalanceCache,
-  usdtBalanceCache,
-  withRpcCache
-} from './rpcCache';
 import dataProvider from 'dataPrvider';
+import { fetchAssetBalance } from './fetchAssetBalance';
 import { workplaceFilter } from 'helpers/userTagsCache';
 
 export { formatRoyaltyFull, formatRoyaltyShort } from './formatRoyalty';
 export { convertEthToUsd, convertUsdToEth } from './exchangeRates';
+export {
+  fetchPublicBlockchainConfig,
+  getBlockExplorerBaseUrl,
+  getExplorerAddressUrl,
+  getExplorerNftTokenUrl,
+  getExplorerTxUrl,
+  getPublicContract,
+  preloadPublicBlockchainConfig
+} from './publicBlockchainConfig';
 import {
   setAcceptNftLoading,
   setAcceptTableLoading,
@@ -39,135 +39,25 @@ import {
 } from 'redux-state/nftMarketplace/actions';
 import { Profile } from 'components/CardProfile';
 import { Tag } from 'interface/common';
+import {
+  formatPaymentAmountFromAddress,
+  isEthPaymentToken,
+  parsePaymentAmount,
+  paymentTokenTypeFromAddress
+} from './paymentToken';
 
-export const provider = new ethers.providers.StaticJsonRpcProvider(
-  Config.INFURA_URL
-);
 export const mindMinerOpsWalletAddress = Config.MINDMINER_OPS_WALLET_ADDRESS;
-
-const ideaCoinContract = new ethers.Contract(
-  Config.IDEACOIN_CONTRACT_ADDRESS,
-  RoyaltyCoinABI,
-  provider
-);
-
-interface Rates {
-  [key: string]: string;
-}
-
-export type Chain = {
-  chainId: string;
-  name: string;
-  blockExplorerUrl: string;
-  rpcUrl: string;
-};
-
-export const sepolia: Chain = {
-  chainId: Config.RPC_TEST_CHAIN_ID,
-  name: Config.SEPOLIA_TESTNET_NAME,
-  blockExplorerUrl: Config.ETHERSCAN_BASE_URL,
-  rpcUrl: Config.INFURA_URL
-};
-
-export const mainnet: Chain = {
-  chainId: Config.RPC_CHAIN_ID,
-  name: Config.POLYGON_MAINNET_NAME,
-  blockExplorerUrl: Config.POLYGON_EXPLORER_URL,
-  rpcUrl: Config.MAINNET_INFURA_URL
-};
-
-export const CHAINS_CONFIG = {
-  [sepolia.chainId]: sepolia,
-  [mainnet.chainId]: mainnet
-};
-
-const marketplaceContract = new ethers.Contract(
-  Config.MARKETPLACE_CONTRACT_ADDRESS,
-  MarketplaceAbi,
-  provider
-);
-
-const DISPLAY_TIME = 2500;
-
-const fetchAuctionDataCached = (auctionId: string) =>
-  withRpcCache(auctionCache, String(auctionId), async () => {
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-    return ideaMarketplaceContract.auction(auctionId);
-  });
-
-export const getOwnedNfts = async (address: string) => {
-  const nfts = await marketplaceContract.balanceOf(address);
-  return nfts.toNumber();
-};
-
-export const calculateGasFee = async (gasEstimate) => {
-  try {
-    if (!gasEstimate) {
-      console.error('Gas estimate is undefined');
-      return undefined;
-    }
-    const gasPrice = await provider.getGasPrice();
-    if (!gasPrice) {
-      console.error('Gas price is undefined');
-      return undefined;
-    }
-    const gasFee = gasEstimate.mul(gasPrice);
-    // Ensure we convert BigNumber to string before returning
-    return ethers.utils.formatUnits(gasFee, Constants.ETHER);
-  } catch (error) {
-    console.error(ERRORS.GAS_FEE, error);
-    return undefined;
-  }
-};
 
 export const estimateGasForNft = async (
   recipientAddress: string,
   tokenURI: string
 ) => {
   try {
-    const gasEstimate = await marketplaceContract.estimateGas.mintPatentToken(
+    const data = await dataProvider.estimateMarketplaceMintGas({
       recipientAddress,
-      tokenURI,
-      { from: mindMinerOpsWalletAddress }
-    );
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
-  } catch (error) {
-    console.error(ERRORS.ESTIMATE_GAS, error);
-    throw error;
-  }
-};
-
-export const estimateGasForApproval = async (
-  fromAddress: string,
-  amount: BigNumber | string | number,
-  spender?: string
-) => {
-  try {
-    let amountBN: BigNumber;
-    if (BigNumber.isBigNumber(amount)) {
-      amountBN = amount;
-    } else {
-      const decimals = await ideaCoinContract.decimals();
-      if (typeof amount === 'string' || typeof amount === 'number') {
-        amountBN = ethers.utils.parseUnits(amount.toString(), decimals);
-      } else {
-        throw new Error('Invalid amount type');
-      }
-    }
-
-    const approveSpender = spender ?? fromAddress;
-    const gasEstimate = await ideaCoinContract.estimateGas.approve(
-      approveSpender,
-      amountBN,
-      { from: fromAddress }
-    );
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+      tokenURI
+    });
+    return data?.gasFeeEther;
   } catch (error) {
     console.error(ERRORS.ESTIMATE_GAS, error);
     throw error;
@@ -178,29 +68,21 @@ export const estimateGasForListNft = async (
   walletAddress: string,
   tokenId: string,
   nftContract: string,
-  listPrice: BigNumber
+  listPrice: BigNumber,
+  paymentToken: string
 ) => {
   try {
     if (!walletAddress) {
-      throw new Error('Wallet address is required');
+      throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
     }
 
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const gasEstimate =
-      await ideaMarketplaceContract.estimateGas.listPatentTokenForFixedPrice(
-        tokenId,
-        listPrice,
-        nftContract,
-        { from: walletAddress }
-      );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    const data = await dataProvider.estimateMarketplaceListFixedGas({
+      walletAddress,
+      tokenId,
+      listPriceWei: listPrice.toString(),
+      paymentToken
+    });
+    return data?.gasFeeEther;
   } catch (error) {
     console.error(ERRORS.ESTIMATING_LIST_NFT, error);
     throw error;
@@ -221,50 +103,11 @@ export const listNftTransaction = async (
     };
   },
   pagination: { page: number; perPage: number },
-  user: Profile
+  user: Profile,
+  paymentToken: string
 ) => {
   if (!walletAddress) {
-    throw new Error('Wallet address is required');
-  }
-
-  const hasSufficientBalance = await checkBalanceAndToast(walletAddress);
-  if (!hasSufficientBalance) {
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
-    return;
-  }
-
-  const userBalance = await getBalanceByType(ASSET_TYPES.NFT, walletAddress);
-
-  const gas = await estimateGasForListNFTApproval(
-    walletAddress,
-    tokenId,
-    Config.MARKETPLACE_CONTRACT_ADDRESS
-  );
-
-  const requiredBalance = parseFloat(gas) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
-
-  if (parseFloat(String(userBalance)) < requiredBalance) {
-    toastify(
-      ERRORS.INSUFFICIENT_BALANCE,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
-    dispatch(setListNftLoading(tokenId, false));
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
-    return;
+    throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
   }
 
   dispatch(
@@ -275,7 +118,8 @@ export const listNftTransaction = async (
       filters,
       pagination,
       user,
-      walletAddress
+      walletAddress,
+      paymentToken
     )
   );
 };
@@ -287,65 +131,37 @@ export const estimateGasForListAuctionNft = async (
   listPrice: BigNumber,
   auctionStartTime: BigNumber,
   auctionEndTime: BigNumber,
-  dispatch: any
+  dispatch: any,
+  paymentToken: string
 ) => {
   try {
     if (!walletAddress) {
-      throw new Error('Wallet address is required');
-    }
-
-    const isExpired = await checkNftExpiry(
-      tokenId,
-      dispatch,
-      setListNftLoading,
-      tokenId
-    );
-    if (isExpired) {
-      return;
+      throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
     }
 
     const currentTime = BigNumber.from(Math.floor(Date.now() / 1000));
 
     if (auctionStartTime.lte(currentTime) || auctionEndTime.lte(currentTime)) {
-      toastify(
-        ERRORS.START_TIME_ERROR,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
+      showToast(ERRORS.START_TIME_ERROR, VARIANT.ERROR);
       dispatch(setListNftLoading(tokenId, false));
       return;
     }
 
     if (auctionEndTime.lte(auctionStartTime)) {
-      toastify(
-        ERRORS.AUCTION_TIME_RANGE_ERROR,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
+      showToast(ERRORS.AUCTION_TIME_RANGE_ERROR, VARIANT.ERROR);
       dispatch(setListNftLoading(tokenId, false));
       return;
     }
 
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const gasEstimate =
-      await ideaMarketplaceContract.estimateGas.listItemForAuction(
-        listPrice,
-        auctionStartTime,
-        auctionEndTime,
-        tokenId,
-        nftContract,
-        { from: walletAddress }
-      );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    const data = await dataProvider.estimateMarketplaceListAuctionGas({
+      walletAddress,
+      tokenId,
+      listPriceWei: listPrice.toString(),
+      auctionStartTime: auctionStartTime.toNumber(),
+      auctionEndTime: auctionEndTime.toNumber(),
+      paymentToken
+    });
+    return data?.gasFeeEther;
   } catch (error) {
     console.error(ERRORS.ESTIMATING_LIST_NFT, error);
     throw error;
@@ -368,83 +184,24 @@ export const listNftAuctionTransaction = async (
     };
   },
   pagination: { page: number; perPage: number },
-  user: Profile
+  user: Profile,
+  paymentToken: string
 ) => {
   if (!walletAddress) {
-    throw new Error('Wallet address is required');
-  }
-
-  const isExpired = await checkNftExpiry(
-    tokenId,
-    dispatch,
-    setListNftLoading,
-    tokenId
-  );
-  if (isExpired) {
-    return;
+    throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
   }
 
   const currentTime = BigNumber.from(Math.floor(Date.now() / 1000));
 
   if (auctionStartTime.lte(currentTime) || auctionEndTime.lte(currentTime)) {
-    toastify(
-      ERRORS.START_TIME_ERROR,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
+    showToast(ERRORS.START_TIME_ERROR, VARIANT.ERROR);
     dispatch(setListNftLoading(tokenId, false));
     return;
   }
 
   if (auctionEndTime.lte(auctionStartTime)) {
-    toastify(
-      ERRORS.AUCTION_TIME_RANGE_ERROR,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
+    showToast(ERRORS.AUCTION_TIME_RANGE_ERROR, VARIANT.ERROR);
     dispatch(setListNftLoading(tokenId, false));
-    return;
-  }
-
-  const hasSufficientBalance = await checkBalanceAndToast(walletAddress);
-  if (!hasSufficientBalance) {
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
-    return;
-  }
-
-  const userBalance = await getBalanceByType(ASSET_TYPES.NFT, walletAddress);
-
-  const gas = await estimateGasForListNFTApproval(
-    walletAddress,
-    tokenId,
-    Config.MARKETPLACE_CONTRACT_ADDRESS
-  );
-
-  const requiredBalance = parseFloat(gas) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
-
-  if (parseFloat(String(userBalance)) < requiredBalance) {
-    toastify(
-      ERRORS.INSUFFICIENT_BALANCE,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
-    dispatch(setListNftLoading(tokenId, false));
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
     return;
   }
 
@@ -458,7 +215,8 @@ export const listNftAuctionTransaction = async (
       filters,
       pagination,
       user,
-      walletAddress
+      walletAddress,
+      paymentToken
     )
   );
 };
@@ -483,7 +241,7 @@ export const checkUserBalance = async (
       return false;
     }
 
-    const wallet = new ethers.Wallet(privateKey, provider);
+    const wallet = new ethers.Wallet(privateKey);
 
     const userBalance = await getBalanceByType(ASSET_TYPES.NFT, wallet.address);
     const userBalanceNumber = parseFloat(String(userBalance));
@@ -495,12 +253,7 @@ export const checkUserBalance = async (
     return true;
   } catch (error) {
     console.error(ERRORS.USER_BALANCE_ERROR, error);
-    toastify(
-      ERRORS.INSUFFICIENT_BALANCE,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      2500
-    );
+    showToast(ERRORS.INSUFFICIENT_BALANCE, VARIANT.ERROR);
     return false;
   }
 };
@@ -512,17 +265,9 @@ export const checkNftExpiry = async (
   tokenIdForLoading?: string | number
 ): Promise<boolean> => {
   try {
-    const expiryTime =
-      await marketplaceContract.getPatentTokenExpireTime(tokenId);
-    const currentTimestamp = Math.floor(Date.now() / 1000);
-
-    if (currentTimestamp > Number(expiryTime)) {
-      toastify(
-        Constants.NFT_EXPIRED,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
+    const data = await dataProvider.getMarketplaceNftExpiry(String(tokenId));
+    if (data?.expired) {
+      showToast(Constants.NFT_EXPIRED, VARIANT.ERROR);
       if (setLoading && tokenIdForLoading !== undefined) {
         setLoading(tokenIdForLoading, false);
       }
@@ -538,15 +283,11 @@ export const checkNftExpiry = async (
 
 export const getNftOwnerAddress = async (tokenId: string): Promise<string> => {
   try {
-    const ideaNftContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-    const nftOwnerAddress = (
-      await ideaNftContract.ownerOf(tokenId)
-    ).toLowerCase();
-    return nftOwnerAddress;
+    const data = await dataProvider.getMarketplaceNftOwner(tokenId);
+    if (!data?.ownerAddress) {
+      throw new Error('NFT owner not found');
+    }
+    return String(data.ownerAddress).toLowerCase();
   } catch (error) {
     console.error('Error in getNftOwnerAddress:', error);
     throw error;
@@ -559,15 +300,7 @@ export const getNftOwnerPrivateKey = async (
   userPrivateKey: string | undefined
 ): Promise<string> => {
   try {
-    // Get the NFT owner from the blockchain
-    const ideaNftContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-    const nftOwnerAddress = (
-      await ideaNftContract.ownerOf(tokenId)
-    ).toLowerCase();
+    const nftOwnerAddress = await getNftOwnerAddress(tokenId);
 
     // Check if user has a company/tag
     const tags = await dataProvider.getList<Tag>('tags', {
@@ -587,7 +320,7 @@ export const getNftOwnerPrivateKey = async (
       privateKey = userPrivateKey;
       if (userPrivateKey) {
         // Check if NFT is owned by user wallet
-        const userWallet = new ethers.Wallet(userPrivateKey, provider);
+        const userWallet = new ethers.Wallet(userPrivateKey);
         ownerAddress = userWallet.address.toLowerCase();
       }
     }
@@ -614,16 +347,9 @@ export const getNftOwnerPrivateKey = async (
 export const getListingOwnerAddress = async (
   fixedId: string
 ): Promise<string> => {
-  const ideaMarketplaceContract = new ethers.Contract(
-    Config.MARKETPLACE_CONTRACT_ADDRESS,
-    MarketplaceAbi,
-    provider
-  );
-
   try {
-    const fixedPriceData = await ideaMarketplaceContract.fixedPrice(fixedId);
-    const ownerAddress = fixedPriceData.owner.toLowerCase();
-    return ownerAddress;
+    const data = await dataProvider.getMarketplaceFixedPrice(fixedId);
+    return String(data?.fixedPrice?.owner).toLowerCase();
   } catch (error) {
     console.error(
       '[CANCEL FIXED] Error fetching fixed price listing data:',
@@ -637,9 +363,8 @@ export const getAuctionOwnerAddress = async (
   auctionId: string
 ): Promise<string> => {
   try {
-    const auctionData = await fetchAuctionDataCached(auctionId);
-    const ownerAddress = auctionData.patentTokenOwner.toLowerCase();
-    return ownerAddress;
+    const data = await dataProvider.getMarketplaceAuction(auctionId);
+    return String(data?.auction?.patentTokenOwner).toLowerCase();
   } catch (error) {
     console.error('🔴 [CANCEL AUCTION] Error fetching auction data:', error);
     throw error;
@@ -702,7 +427,7 @@ export const getPrivateKeyForListingOwner = async (
 
   if (userPrivateKey) {
     try {
-      const userWallet = new ethers.Wallet(userPrivateKey, provider);
+      const userWallet = new ethers.Wallet(userPrivateKey);
       const userWalletAddress = userWallet.address.toLowerCase();
 
       if (userWalletAddress === ownerAddress.toLowerCase()) {
@@ -733,31 +458,11 @@ export const estimateGasForBuyNft = async (
   fixedId: string
 ) => {
   try {
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const priceData = await ideaMarketplaceContract.fixedPrice(fixedId);
-
-    const tokenId = Number(priceData.tokenId);
-    const isExpired = await checkNftExpiry(tokenId);
-    if (isExpired) {
-      return;
-    }
-
-    const gasEstimate =
-      await ideaMarketplaceContract.estimateGas.buyFixedPricePatentToken(
-        fixedId,
-        {
-          value: priceData.patentTokenPrice,
-          from: walletAddress
-        }
-      );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    const data = await dataProvider.estimateMarketplaceBuyGas({
+      walletAddress,
+      fixedId
+    });
+    return data?.gasFeeEther;
   } catch (error) {
     console.error('Error in estimateGasForBuyNft:', error);
     throw error;
@@ -775,16 +480,15 @@ export const buyNftTransaction = async (
 ) => {
   try {
     if (!walletAddress) {
-      throw new Error('Wallet address is required to buy NFT');
+      throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
     }
 
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const priceData = await ideaMarketplaceContract.fixedPrice(fixedId);
+    const priceDataResponse =
+      await dataProvider.getMarketplaceFixedPrice(fixedId);
+    const priceData = priceDataResponse?.fixedPrice;
+    if (!priceData) {
+      throw new Error('Fixed price listing not found');
+    }
 
     const tokenId = Number(priceData.tokenId);
     const isExpired = await checkNftExpiry(
@@ -819,89 +523,15 @@ export const estimateGasForBidNftByAddress = async (
   walletAddress: string,
   auctionId: string,
   newBidAmount: string,
-  dispatch: any,
-  userBalance?: string | number
+  _dispatch: any,
+  _userBalance?: string | number
 ): Promise<string> => {
-  const ideaMarketplaceContract = new ethers.Contract(
-    Config.MARKETPLACE_CONTRACT_ADDRESS,
-    MarketplaceAbi,
-    provider
-  );
-
-  // Fetch all auction data for comprehensive validation
-  const auctionData = await ideaMarketplaceContract.auction(auctionId);
-  const {
-    initialPrice,
-    currentBidAmount,
-    currentBidder,
-    auctionStartTime,
-    auctionEndTime,
-    patentTokenOwner,
-    listed,
-    isSold,
-    tokenId
-  } = auctionData;
-
-  // Get current block timestamp
-  const currentBlock = await provider.getBlock('latest');
-  const currentTimestamp = currentBlock.timestamp;
-
-  // Get NFT expiry time
-  const expiryTime =
-    await marketplaceContract.getPatentTokenExpireTime(tokenId);
-
-  // Comprehensive validation checks
-  const validations = {
-    auctionIdValid: auctionId !== '0' && Number(auctionId) !== 0,
-    auctionStarted: currentTimestamp > Number(auctionStartTime),
-    auctionNotEnded: currentTimestamp < Number(auctionEndTime),
-    userNotSeller:
-      walletAddress.toLowerCase() !== patentTokenOwner.toLowerCase(),
-    nftListed: listed === true,
-    nftNotSold: isSold === false,
-    nftNotExpired: currentTimestamp <= Number(expiryTime),
-    bidMeetsPrice: false
-  };
-
-  const normalizedBidAmount = Number(newBidAmount);
-  const fixedBidAmount = normalizedBidAmount.toFixed(NUMBERS.EIGHTEEN);
-  const bidValueWei = ethers.utils.parseUnits(fixedBidAmount, 'ether');
-
-  // Check price requirements
-  if (
-    currentBidder === ethers.constants.AddressZero ||
-    currentBidAmount.isZero()
-  ) {
-    validations.bidMeetsPrice = bidValueWei.gte(initialPrice);
-  } else {
-    validations.bidMeetsPrice = bidValueWei.gt(currentBidAmount);
-  }
-
-  // Convert both to numbers for proper comparison
-  const userBalanceNum = parseFloat(String(userBalance || 0));
-  const bidAmountNum = parseFloat(String(newBidAmount || 0));
-
-  if (userBalanceNum < bidAmountNum) {
-    toastify(
-      `Insufficient funds: your balance is ${userBalanceNum} ETH but bid requires ${bidAmountNum} ETH in your wallet.`,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
-    dispatch(setBidNftLoading(false));
-    return;
-  }
-
-  const gasEstimate = await ideaMarketplaceContract.estimateGas.startBid(
+  const data = await dataProvider.estimateMarketplaceBidGas({
+    walletAddress,
     auctionId,
-    {
-      value: bidValueWei,
-      from: walletAddress
-    }
-  );
-
-  const gasFeeEther = await calculateGasFee(gasEstimate);
-  return gasFeeEther;
+    bidAmount: newBidAmount
+  });
+  return data?.gasFeeEther;
 };
 
 export const bidNftTransaction = async (
@@ -913,7 +543,7 @@ export const bidNftTransaction = async (
   nftId: string | number,
   userId?: string | number
 ) => {
-  const wallet = new ethers.Wallet(privateKey, provider);
+  const wallet = new ethers.Wallet(privateKey);
   return bidNftTransactionWithWalletAddress(
     wallet.address,
     auctionId,
@@ -934,16 +564,13 @@ export const bidNftTransactionWithWalletAddress = async (
 ) => {
   try {
     if (!walletAddress) {
-      throw new Error('Wallet address is required to bid on NFT');
+      throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
     }
-
-    const normalizedBidAmount = Number(newBidAmount);
-    const fixedBidAmount = normalizedBidAmount.toFixed(NUMBERS.EIGHTEEN);
 
     dispatch(
       Actions.bidAuctionNft(
         auctionId,
-        fixedBidAmount,
+        String(newBidAmount),
         usdPrice,
         nftId,
         walletAddress
@@ -959,32 +586,13 @@ export const estimateGasForCancelNft = async (
   fixedId: string
 ): Promise<{ gasFeeEther: string; listingOwnerAddress: string }> => {
   try {
-    const contractWithProvider = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const priceData = await contractWithProvider.fixedPrice(fixedId);
-
-    const tokenId = Number(priceData.tokenId);
-    const listingOwnerAddress: string = priceData.owner;
-    const isExpired = await checkNftExpiry(tokenId);
-    if (isExpired) {
-      return {
-        gasFeeEther: '0',
-        listingOwnerAddress
-      };
-    }
-
-    const gasEstimate =
-      await contractWithProvider.estimateGas.cancelListingForFixedPrice(
-        fixedId,
-        { from: listingOwnerAddress }
-      );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return { gasFeeEther, listingOwnerAddress };
+    const data = await dataProvider.estimateMarketplaceCancelFixedGas({
+      fixedId
+    });
+    return {
+      gasFeeEther: data?.gasFeeEther ?? '0',
+      listingOwnerAddress: data?.listingOwnerAddress
+    };
   } catch (error) {
     console.error(ERRORS.CANCEL_FIXED_GAS_ESTIMATE, error);
     throw error;
@@ -999,51 +607,12 @@ export const cancelNftTransaction = async (
   user
 ) => {
   try {
-    const { gasFeeEther, listingOwnerAddress } =
-      await estimateGasForCancelNft(fixedId);
-
-    if (!listingOwnerAddress) {
-      throw new Error('Listing owner address not found on-chain');
+    const priceDataResponse =
+      await dataProvider.getMarketplaceFixedPrice(fixedId);
+    const priceData = priceDataResponse?.fixedPrice;
+    if (!priceData) {
+      throw new Error('Fixed price listing not found');
     }
-
-    const hasSufficientBalance =
-      await checkBalanceAndToast(listingOwnerAddress);
-    if (!hasSufficientBalance) {
-      return;
-    }
-
-    const userBalance = await getBalanceByType(
-      ASSET_TYPES.ETHEREUM,
-      listingOwnerAddress
-    );
-
-    const requiredBalance = parseFloat(gasFeeEther) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
-
-    if (parseFloat(String(userBalance)) < requiredBalance) {
-      toastify(
-        ERRORS.INSUFFICIENT_BALANCE,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
-      dispatch(setCancelNftLoading(fixedId, false));
-      dispatch(
-        Actions.openTransakBuyModal({
-          openTransakBuyModalObj: {
-            open: true
-          }
-        })
-      );
-      return;
-    }
-
-    const contractWithProvider = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const priceData = await contractWithProvider.fixedPrice(fixedId);
 
     const tokenId = Number(priceData.tokenId);
     const isExpired = await checkNftExpiry(
@@ -1073,32 +642,13 @@ export const cancelNftTransaction = async (
 
 export const estimateGasForCancelAuctionNft = async (listingId: string) => {
   try {
-    const contractWithProvider = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const auctionData = await contractWithProvider.auction(listingId);
-
-    const tokenId = Number(auctionData.tokenId);
-    const auctionOwnerAddress: string = auctionData.patentTokenOwner;
-    const isExpired = await checkNftExpiry(tokenId);
-    if (isExpired) {
-      return {
-        gasFeeEther: '0',
-        auctionOwnerAddress
-      };
-    }
-
-    const gasEstimate =
-      await contractWithProvider.estimateGas.cancelListingForAuction(
-        listingId,
-        { from: auctionOwnerAddress }
-      );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return { gasFeeEther, auctionOwnerAddress };
+    const data = await dataProvider.estimateMarketplaceCancelAuctionGas({
+      listingId
+    });
+    return {
+      gasFeeEther: data?.gasFeeEther ?? '0',
+      auctionOwnerAddress: data?.auctionOwnerAddress
+    };
   } catch (error) {
     console.error(ERRORS.CANCEL_AUCTION_GAS_ESTIMATE, error);
     throw error;
@@ -1114,51 +664,11 @@ export const cancelNftAuctionTransaction = async (
   user
 ) => {
   try {
-    const { gasFeeEther, auctionOwnerAddress } =
-      await estimateGasForCancelAuctionNft(listingId);
-
-    if (!auctionOwnerAddress) {
-      throw new Error('Auction owner address not found on-chain');
+    const auctionResponse = await dataProvider.getMarketplaceAuction(listingId);
+    const priceData = auctionResponse?.auction;
+    if (!priceData) {
+      throw new Error('Auction listing not found');
     }
-
-    const hasSufficientBalance =
-      await checkBalanceAndToast(auctionOwnerAddress);
-    if (!hasSufficientBalance) {
-      return;
-    }
-
-    const userBalance = await getBalanceByType(
-      ASSET_TYPES.ETHEREUM,
-      auctionOwnerAddress
-    );
-
-    const requiredBalance = parseFloat(gasFeeEther) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
-
-    if (parseFloat(String(userBalance)) < requiredBalance) {
-      toastify(
-        ERRORS.INSUFFICIENT_BALANCE,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
-      dispatch(setCancelNftLoading(listingId, false));
-      dispatch(
-        Actions.openTransakBuyModal({
-          openTransakBuyModalObj: {
-            open: true
-          }
-        })
-      );
-      return;
-    }
-
-    const contractWithProvider = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const priceData = await contractWithProvider.auction(listingId);
 
     const tokenId = Number(priceData.tokenId);
     const isExpired = await checkNftExpiry(
@@ -1202,8 +712,8 @@ export const resolveClaimWalletForAuction = async (
     tagWalletAddress?: string;
   }
 ): Promise<ClaimWalletResolution> => {
-  const auctionData = await fetchAuctionDataCached(String(auctionId));
-  const onChainCurrentBidder = auctionData.currentBidder as string;
+  const data = await dataProvider.getMarketplaceAuction(String(auctionId));
+  const onChainCurrentBidder = data?.auction?.currentBidder as string;
 
   if (
     !onChainCurrentBidder ||
@@ -1242,27 +752,11 @@ export const estimateGasForClaimNftByAddress = async (
   walletAddress: string,
   auctionId: string
 ): Promise<string> => {
-  const ideaMarketplaceContract = new ethers.Contract(
-    Config.MARKETPLACE_CONTRACT_ADDRESS,
-    MarketplaceAbi,
-    provider
-  );
-
-  const auctionData = await ideaMarketplaceContract.auction(auctionId);
-
-  const tokenId = Number(auctionData.tokenId);
-  const isExpired = await checkNftExpiry(tokenId);
-  if (isExpired) {
-    return;
-  }
-
-  const gasEstimate =
-    await ideaMarketplaceContract.estimateGas.claimPatentToken(auctionId, {
-      from: walletAddress
-    });
-
-  const gasFeeEther = await calculateGasFee(gasEstimate);
-  return gasFeeEther;
+  const data = await dataProvider.estimateMarketplaceClaimGas({
+    walletAddress,
+    auctionId
+  });
+  return data?.gasFeeEther;
 };
 
 export const claimNftTransaction = async (
@@ -1272,7 +766,7 @@ export const claimNftTransaction = async (
   nftId: string | number,
   userId?: string | number
 ) => {
-  const wallet = new ethers.Wallet(privateKey, provider);
+  const wallet = new ethers.Wallet(privateKey);
   return claimNftTransactionWithWalletAddress(
     wallet.address,
     auctionId,
@@ -1295,122 +789,21 @@ export const claimNftTransactionWithWalletAddress = async (
   }
 };
 
-export const estimateGasForTransfer = async (
-  walletAddress: string,
-  destinationAddress: string,
-  amount: BigNumber | string | number
-) => {
-  try {
-    let amountBN: BigNumber;
-    if (BigNumber.isBigNumber(amount)) {
-      amountBN = amount;
-    } else {
-      const decimals = await ideaCoinContract.decimals();
-      if (typeof amount === 'string' || typeof amount === 'number') {
-        amountBN = ethers.utils.parseUnits(amount.toString(), decimals);
-      } else {
-        throw new Error('Invalid amount type');
-      }
-    }
-
-    const contractWithoutSigner = new ethers.Contract(
-      Config.IDEACOIN_CONTRACT_ADDRESS,
-      RoyaltyCoinABI,
-      provider
-    );
-
-    const gasEstimate = await contractWithoutSigner.estimateGas.transfer(
-      destinationAddress,
-      amountBN,
-      { from: walletAddress }
-    );
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
-  } catch (error) {
-    console.log(ERRORS.ESTIMATE_GAS, error.message, error);
-    throw error;
-  }
-};
-
-export const estimateGasForTransferFrom = async (
-  walletAddress: string,
-  destinationAddress: string,
-  amount: BigNumber | string | number
-) => {
-  try {
-    let amountBN: BigNumber;
-    if (BigNumber.isBigNumber(amount)) {
-      amountBN = amount;
-    } else {
-      const decimals = await ideaCoinContract.decimals();
-      if (typeof amount === 'string' || typeof amount === 'number') {
-        amountBN = ethers.utils.parseUnits(amount.toString(), decimals);
-      } else {
-        throw new Error('Invalid amount type');
-      }
-    }
-
-    const gasEstimate = await ideaCoinContract.estimateGas.transferFrom(
-      walletAddress,
-      destinationAddress,
-      amountBN,
-      { from: walletAddress }
-    );
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
-  } catch (error) {
-    console.log(ERRORS.ESTIMATE_GAS, error.message, error);
-    throw error;
-  }
-};
-
-export const estimateGasForEthTransfer = async (
-  to: string,
-  amount: number,
-  from?: string
-): Promise<string> => {
-  try {
-    const weiAmount = ethers.utils.parseUnits(
-      amount.toFixed(NUMBERS.EIGHTEEN),
-      'ether'
-    );
-    const gasEstimate = await provider.estimateGas({
-      to,
-      value: weiAmount,
-      ...(from && { from })
-    });
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
-  } catch (error) {
-    console.error(ERRORS.ESTIMATE_GAS, error);
-    throw error;
-  }
-};
-
 export const estimateGasForListNFTApproval = async (
   walletAddress: string,
   tokenId: string,
-  marketplaceAddress: string
+  _marketplaceAddress: string
 ) => {
   try {
     if (!walletAddress) {
-      throw new Error('Wallet address is required');
+      throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
     }
 
-    const ideaMarketplaceContract = new ethers.Contract(
-      Config.MARKETPLACE_CONTRACT_ADDRESS,
-      MarketplaceAbi,
-      provider
-    );
-
-    const gasEstimate = await ideaMarketplaceContract.estimateGas.approve(
-      marketplaceAddress,
-      tokenId,
-      { from: walletAddress }
-    );
-
-    const gasFeeEther = await calculateGasFee(gasEstimate);
-    return gasFeeEther;
+    const data = await dataProvider.estimateMarketplaceNftApprovalGas({
+      walletAddress,
+      tokenId
+    });
+    return data?.gasFeeEther;
   } catch (error) {
     console.error(ERRORS.ESTIMATE_GAS, error);
     throw error;
@@ -1422,7 +815,7 @@ export const deployNftChecks = async (
   tokenURI: string,
   dispatch: any
 ) => {
-  const signer = new ethers.Wallet(privateKey, provider);
+  const signer = new ethers.Wallet(privateKey);
 
   const hasSufficientBalance = await checkBalanceAndToast(signer.address);
   if (!hasSufficientBalance) {
@@ -1443,12 +836,7 @@ export const deployNftChecks = async (
   const requiredBalance = parseFloat(gasFeeEstimate) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
 
   if (parseFloat(String(userBalance)) < requiredBalance) {
-    toastify(
-      ERRORS.INSUFFICIENT_BALANCE,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
+    showToast(ERRORS.INSUFFICIENT_BALANCE, VARIANT.ERROR);
     dispatch(
       Actions.openTransakBuyModal({
         openTransakBuyModalObj: {
@@ -1466,53 +854,7 @@ export const nftApproval = async (
   dispatch
 ) => {
   if (!walletAddress) {
-    throw new Error('Wallet address is required');
-  }
-
-  const hasSufficientBalance = await checkBalanceAndToast(walletAddress);
-  if (!hasSufficientBalance) {
-    dispatch(setConfirmButtonLoading(false));
-    dispatch(setListNftLoading(tokenId, false));
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
-    return;
-  }
-
-  const gasFee = await estimateGasForListNFTApproval(
-    walletAddress,
-    tokenId,
-    Config.MARKETPLACE_CONTRACT_ADDRESS
-  );
-
-  const userBalance = await getBalanceByType(
-    ASSET_TYPES.ETHEREUM,
-    walletAddress
-  );
-
-  const requiredBalance = parseFloat(gasFee) * NUMBERS.BUFFER; // Adding some buffer to handle fluctuations
-
-  if (parseFloat(String(userBalance)) < requiredBalance) {
-    toastify(
-      ERRORS.INSUFFICIENT_BALANCE,
-      VARIANT.ERROR,
-      VARIANT.TOP_LEFT,
-      DISPLAY_TIME
-    );
-    dispatch(setConfirmButtonLoading(false));
-    dispatch(setListNftLoading(tokenId, false));
-    dispatch(
-      Actions.openTransakBuyModal({
-        openTransakBuyModalObj: {
-          open: true
-        }
-      })
-    );
-    return;
+    throw new Error(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND);
   }
 
   try {
@@ -1534,7 +876,7 @@ export const initDeployNFT = async (
 ) => {
   try {
     if (!walletAddress) {
-      throw new CustomError('Wallet address is required', 400);
+      throw new CustomError(ERRORS.MARKETPLACE_SIGNING_WALLET_NOT_FOUND, 400);
     }
 
     const userBalance = await getBalanceByType(
@@ -1559,11 +901,9 @@ export const initDeployNFT = async (
       gasFeeEstimate = await estimateGasForNft(walletAddress, tokenURI);
     } catch (gasError) {
       console.error('Gas estimation failed:', gasError);
-      toastify(
+      showToast(
         'Failed to estimate gas fees. Please check your network connection and try again.',
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
+        VARIANT.ERROR
       );
       throw new CustomError(
         gasError?.message || 'Gas estimation failed. Please try again.',
@@ -1572,12 +912,7 @@ export const initDeployNFT = async (
     }
 
     if (userBalance < gasFeeEstimate) {
-      toastify(
-        ERRORS.INSUFFICIENT_BALANCE,
-        VARIANT.ERROR,
-        VARIANT.TOP_LEFT,
-        DISPLAY_TIME
-      );
+      showToast(ERRORS.INSUFFICIENT_BALANCE, VARIANT.ERROR);
       dispatch(
         Actions.openTransakBuyModal({
           openTransakBuyModalObj: {
@@ -1595,78 +930,16 @@ export const initDeployNFT = async (
   }
 };
 
-export const getTransactions = async (address: string, type: string) => {
-  let url = '';
-  const options = {
-    method: 'GET',
-    headers: {
-      accept: 'application/json',
-      'X-API-Key': Config.MORALIS_API_KEY
-    }
-  };
-  if (type === ASSET_TYPES.ETHEREUM) {
-    url = `${Config.MORALIS_API_URL}/${address}?${Constants.CHAIN}=${Config.NEXT_PUBLIC_WALLET_NETWORK}`;
-  } else if (type === ASSET_TYPES.IDEACOINS) {
-    url = `${Config.MORALIS_API_URL}/${address}/${Constants.ERC20}/${Constants.TRANSFERS}?${Constants.CHAIN}=${Config.NEXT_PUBLIC_WALLET_NETWORK}&type=both`;
-  } else if (type === ASSET_TYPES.NFT) {
-    url = `${Config.MORALIS_API_URL}/${address}/${Constants.NFT_TEXT}/${Constants.TRANSFERS}?${Constants.CHAIN}=${Config.NEXT_PUBLIC_WALLET_NETWORK}`;
-  }
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    throw new Error(`${Constants.ERROR}: ${response.status}`);
-  }
-  return response.json();
-};
-
 export const getBalanceByType = async (type: string, address: string) => {
-  try {
-    if (type === ASSET_TYPES.ETHEREUM || type === ASSET_TYPES.NFT) {
-      const key = address.toLowerCase();
-      return withRpcCache(ethBalanceCache, key, async () => {
-        const ownerEthBalance = await provider.getBalance(address);
-        return ethers.utils.formatEther(ownerEthBalance);
-      });
-    } else if (type === ASSET_TYPES.IDEACOINS) {
-      const ideaCoinBalance = await getIdeaCoinBalance(address);
-      return ideaCoinBalance;
-    } else {
-      throw new Error(ERRORS.INVALID_BALANCE_TYPE);
-    }
-  } catch (error) {
-    console.error(`${ERRORS.FETCH_BALANCE} ${type}:`, error);
-  }
+  return fetchAssetBalance(type, address);
 };
 
 export const getMinimumBidAmount = async (
   auctionId: string
 ): Promise<number | undefined> => {
   try {
-    const auctionData = await fetchAuctionDataCached(auctionId);
-
-    const {
-      currentBidAmount,
-      currentBidder,
-      initialPrice
-    }: {
-      currentBidAmount: BigNumber;
-      currentBidder: string;
-      initialPrice: BigNumber;
-    } = auctionData;
-
-    // If no bids exist (currentBidder is zero address), minimum is initial price
-    // If bids exist, minimum is current bid amount
-    let minBidWei: BigNumber;
-    if (
-      currentBidder === ethers.constants.AddressZero ||
-      currentBidAmount.isZero()
-    ) {
-      minBidWei = initialPrice;
-    } else {
-      minBidWei = currentBidAmount;
-    }
-
-    const minBidEth = parseFloat(ethers.utils.formatEther(minBidWei));
-    return minBidEth;
+    const data = await dataProvider.getMarketplaceAuction(auctionId);
+    return data?.auction?.minBidAmount;
   } catch (error) {
     console.error('Error fetching minimum bid amount:', error);
     return undefined;
@@ -1692,91 +965,19 @@ export const formatTokenAmount = (
   return fixed;
 };
 
-export const getOwnerEthBalance = async () => {
-  const ownerEthBalance = await provider.getBalance(mindMinerOpsWalletAddress);
-  return ethers.utils.formatEther(ownerEthBalance);
+export const getUsdtAllowanceForAddress = async (
+  owner: string,
+  spender: string = Config.MARKETPLACE_CONTRACT_ADDRESS
+): Promise<ethers.BigNumber> => {
+  const data = await dataProvider.getMarketplaceUsdtAllowance(owner, spender);
+  return ethers.BigNumber.from(data?.allowance ?? 0);
 };
 
-const USDT_BALANCE_ABI = ['function balanceOf(address) view returns (uint256)'];
-
-export const getOwnerUsdtBalance = async () => {
-  try {
-    const key = mindMinerOpsWalletAddress.toLowerCase();
-    return withRpcCache(usdtBalanceCache, key, async () => {
-      const usdtContract = new ethers.Contract(
-        Config.USDT_CONTRACT_ADDRESS,
-        USDT_BALANCE_ABI,
-        provider
-      );
-      const balance = await usdtContract.balanceOf(mindMinerOpsWalletAddress);
-      return ethers.utils.formatUnits(balance, 6);
-    });
-  } catch (error) {
-    console.error(ERRORS.FAILED_TO_CONVERT_MATIC, error);
-    return '0';
-  }
-};
-
-export const showUserIdeaBalance = async (address: string): Promise<number> => {
-  try {
-    const ideaCoinBalance = await getIdeaCoinBalance(address);
-    const formattedBalance =
-      typeof ideaCoinBalance === 'number'
-        ? parseFloat(ideaCoinBalance.toFixed(6))
-        : ideaCoinBalance;
-    return formattedBalance;
-  } catch (error) {
-    console.error(ERRORS.GET_IDEA_COINS, error);
-  }
-};
-
-export const fetchIdeaCoinPriceUsd = async (
-  chainId?: number
-): Promise<number> => {
-  return dataProvider.getIdeaCoinPriceUsd(chainId);
-};
-
-export const getTotalIdeaCoinSupply = async (): Promise<number> => {
-  try {
-    const [decimals, distributedRaw] = await Promise.all([
-      ideaCoinContract.decimals(),
-      ideaCoinContract.totalRewardsDistributed()
-    ]);
-
-    const distributed = Number(
-      ethers.utils.formatUnits(distributedRaw, decimals)
-    );
-
-    return Number.isNaN(distributed) ? 0 : distributed;
-  } catch (error) {
-    console.error(ERRORS.GET_IDEA_COINS, error);
-    return 0;
-  }
-};
-
-const truncateToFourDecimalPlaces = (value: number): number => {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  return Math.floor(value * 10000) / 10000;
-};
-
-export const getNftTitleByTokenId = async (
-  tokenId: string
-): Promise<string> => {
-  try {
-    const tokenUri = await marketplaceContract.tokenURI(tokenId);
-    let metadataUrl = tokenUri;
-    if (tokenUri.includes(`/${Constants.IPFS}/`)) {
-      const ipfsHash = tokenUri.split(`/${Constants.IPFS}/`)[1];
-      metadataUrl = `https://ipfs.io/${Constants.IPFS}/${ipfsHash}`;
-    }
-    const { name } = await fetchNftMetadata(metadataUrl);
-    return name || `NFT #${tokenId}`;
-  } catch (error) {
-    console.error('Error fetching NFT title:', error);
-    return `NFT #${tokenId}`;
-  }
+export const isUsdtAllowanceError = (error: unknown): boolean => {
+  const errorData =
+    (error as { error?: { data?: string }; data?: string })?.error?.data ??
+    (error as { data?: string })?.data;
+  return typeof errorData === 'string' && errorData.startsWith('0xfb8f41b2');
 };
 
 export type NftTitleInfo = { title: string; nftId: string };
@@ -1836,152 +1037,27 @@ export const fetchNftMetadata = async (
   }
 };
 
-const fetchLivePrices = async (): Promise<{ [key: string]: number }> => {
-  const url = Config.COINBASE_API_URL;
-
-  try {
-    const response = await fetch(`${url}?currency=${Config.CURRENCY}`);
-    const data = await response.json();
-    const rates: Rates = data.data.rates;
-
-    const results: { [key: string]: number } = {};
-    CURRENCIES.forEach((currency) => {
-      if (rates[currency]) {
-        results[currency] = parseFloat(rates[currency]);
-      }
-    });
-
-    return results;
-  } catch (error) {
-    console.error(ERRORS.FETCHING_LIVE_PRICES, error.message);
-  }
-};
-
-const formatBalance = (balance: ethers.BigNumber): number => {
-  return parseFloat(ethers.utils.formatUnits(balance, 18));
-};
-
-export const convertIdeaCoinsToMatic = async (
-  ideaBalance: number,
-  rewardPoolThreshold: number
-): Promise<number> => {
-  try {
-    const totalRewardsDistributed = formatBalance(
-      await ideaCoinContract.totalRewardsDistributed()
-    );
-    return parseFloat(
-      ((ideaBalance * rewardPoolThreshold) / totalRewardsDistributed).toFixed(
-        12
-      )
-    );
-  } catch (error) {
-    console.error(ERRORS.IDEA_COINS_TO_MATIC, error);
-  }
-};
-
-const convertUsdtToCurrency = async (usdtAmount: number) => {
-  try {
-    const prices = await fetchLivePrices();
-    const conversions = [];
-
-    for (const key in prices) {
-      conversions.push({
-        currency: key,
-        amount: usdtAmount * prices[key]
-      });
-    }
-
-    return conversions;
-  } catch (error) {
-    console.error(ERRORS.FAILED_TO_CONVERT_MATIC, error);
-  }
-};
-
-export const getIdeaCoinBalance = async (address: string): Promise<number> => {
-  try {
-    const key = address.toLowerCase();
-    return withRpcCache(ideaBalanceCache, key, async () => {
-      const balance = await ideaCoinContract.balanceOf(address);
-      const rawBalanceNum = formatBalance(balance);
-      const fixed6Balance = parseFloat(rawBalanceNum.toFixed(6));
-      console.log('[getIdeaCoinBalance] ideaPoints / ideaCoins balance:', {
-        address,
-        rawContractBalance: balance?.toString(),
-        formattedUnits18: rawBalanceNum,
-        fixed6Balance
-      });
-      return fixed6Balance;
-    });
-  } catch (error) {
-    console.error(ERRORS.ERROR_FETCHING_IDEACOIN_BALANCE, address, error);
-  }
-};
-
-const fetchCurrencyData = async (
-  address: string,
-  rewardPoolThreshold: number
-) => {
-  const defaultConversions = CURRENCIES.map((currency) => {
-    return {
-      currency,
-      amount: 0
-    };
-  });
-
-  try {
-    let maticAmount: number;
-    if (address.toLowerCase() === mindMinerOpsWalletAddress.toLowerCase()) {
-      const ownerEthBalance = await provider.getBalance(
-        mindMinerOpsWalletAddress
-      );
-      maticAmount = parseFloat(ethers.utils.formatEther(ownerEthBalance));
-    } else {
-      const ideaBalance = await getIdeaCoinBalance(address);
-      maticAmount = await convertIdeaCoinsToMatic(
-        ideaBalance,
-        rewardPoolThreshold
-      );
-    }
-
-    const conversions =
-      maticAmount > 0
-        ? await convertUsdtToCurrency(maticAmount)
-        : defaultConversions;
-
-    return { maticAmount, conversions };
-  } catch (error) {
-    console.error(ERRORS.FETCHING_CURRENCY_DATA, error);
-    return {
-      maticAmount: 0,
-      conversions: defaultConversions
-    };
-  }
-};
-
-export const userCurrencyData = async (walletAddress, rewardPoolThreshold) => {
-  return fetchCurrencyData(walletAddress, rewardPoolThreshold);
-};
-
-export const ownerCurrencyData = async (rewardPoolThreshold) => {
-  return fetchCurrencyData(mindMinerOpsWalletAddress, rewardPoolThreshold);
-};
-
 export const getOriginalCreator = async (tokenId: string) => {
-  const originalCreator = await marketplaceContract.getRoyaltyReciever(tokenId);
-  return originalCreator;
+  const data = await dataProvider.getMarketplaceRoyaltyReceiver(tokenId);
+  return data?.royaltyReceiver;
 };
 
 export const getOriginalCreatorRoyalty = async (tokenId: string) => {
-  const data = await marketplaceContract.fixedPrice(tokenId);
-  return data.royaltyFeePercentage;
+  const data = await dataProvider.getMarketplaceFixedPrice(tokenId);
+  return data?.fixedPrice?.royaltyFeePercentage;
 };
 
 export const getCurrentBidAmount = async (tokenId: string) => {
-  const data = await fetchAuctionDataCached(tokenId);
-  return data.currentBidAmount;
+  const data = await dataProvider.getMarketplaceAuction(tokenId);
+  return ethers.BigNumber.from(data?.auction?.currentBidAmount ?? 0);
+};
+
+export const getAuctionPaymentToken = async (tokenId: string) => {
+  const data = await dataProvider.getMarketplaceAuction(tokenId);
+  return data?.auction?.paymentToken as string;
 };
 
 export const getNftAuctionExpireTime = async (tokenId: string) => {
-  const data = await fetchAuctionDataCached(tokenId);
-  return data.auctionEndTime;
+  const data = await dataProvider.getMarketplaceAuction(tokenId);
+  return ethers.BigNumber.from(data?.auction?.auctionEndTime ?? 0);
 };
