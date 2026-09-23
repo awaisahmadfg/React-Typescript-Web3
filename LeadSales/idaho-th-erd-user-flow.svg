@@ -1,0 +1,175 @@
+<svg width="1600" height="1200" viewBox="0 0 1600 1200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#059669"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#d97706"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font-family: DejaVu Sans; font-size: 42px; font-weight: 800; fill: #0f172a; }
+      .subtitle { font-family: DejaVu Sans; font-size: 20px; font-weight: 600; fill: #475569; }
+      .section { font-family: DejaVu Sans; font-size: 25px; font-weight: 800; fill: #0f172a; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; }
+      .cardBlue { fill: #eff6ff; stroke: #2563eb; stroke-width: 2.5; }
+      .cardGreen { fill: #ecfdf5; stroke: #059669; stroke-width: 2.5; }
+      .cardAmber { fill: #fffbeb; stroke: #d97706; stroke-width: 2.5; }
+      .cardPurple { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 2.5; }
+      .cardRed { fill: #fef2f2; stroke: #dc2626; stroke-width: 2.5; }
+      .head { font-family: DejaVu Sans; font-size: 22px; font-weight: 800; fill: #0f172a; }
+      .field { font-family: DejaVu Sans Mono; font-size: 17px; font-weight: 600; fill: #334155; }
+      .muted { font-family: DejaVu Sans; font-size: 16px; font-weight: 600; fill: #64748b; }
+      .label { font-family: DejaVu Sans; font-size: 16px; font-weight: 800; fill: #334155; }
+      .small { font-family: DejaVu Sans; font-size: 15px; font-weight: 600; fill: #475569; }
+      .tiny { font-family: DejaVu Sans; font-size: 13px; font-weight: 600; fill: #64748b; }
+      .pillText { font-family: DejaVu Sans; font-size: 15px; font-weight: 800; fill: #0f172a; }
+      .flowText { font-family: DejaVu Sans; font-size: 18px; font-weight: 800; fill: #0f172a; }
+      .flowSub { font-family: DejaVu Sans; font-size: 14px; font-weight: 600; fill: #475569; }
+      .note { font-family: DejaVu Sans; font-size: 16px; font-weight: 700; fill: #92400e; }
+      .shadow { filter: drop-shadow(0 8px 16px rgba(15, 23, 42, 0.10)); }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1600" height="1200"/>
+  <rect x="40" y="32" width="1520" height="88" rx="18" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="70" y="82" class="title">Idaho TH Schema Design + User Flow</text>
+  <text x="70" y="108" class="subtitle">Auth0 roles, tRPC authorization, housing applications, provider eligibility, and PDF storage</text>
+  <text x="1324" y="84" class="subtitle" text-anchor="middle">Roles: staff | provider</text>
+
+  <!-- ERD section -->
+  <text x="56" y="164" class="section">ERD / Data Model</text>
+
+  <!-- Auth0 pseudo entity -->
+  <g class="shadow">
+    <rect x="56" y="188" width="330" height="205" rx="14" class="cardPurple"/>
+    <text x="78" y="226" class="head">Auth0 User</text>
+    <text x="78" y="258" class="muted">External identity, not Prisma table</text>
+    <text x="78" y="292" class="field">sub</text>
+    <text x="78" y="320" class="field">email</text>
+    <text x="78" y="348" class="field">app_metadata.role</text>
+    <text x="78" y="376" class="field">providerId? / pseudonymizedId?</text>
+  </g>
+
+  <g class="shadow">
+    <rect x="456" y="188" width="405" height="315" rx="14" class="cardBlue"/>
+    <text x="480" y="226" class="head">UserHousingApplication</text>
+    <text x="480" y="258" class="field">id PK uuid</text>
+    <text x="480" y="286" class="field">staff string</text>
+    <text x="480" y="314" class="field">stateCode enum US_ID</text>
+    <text x="480" y="342" class="field">clientName string</text>
+    <text x="480" y="370" class="field">rawAiResponse json</text>
+    <text x="480" y="398" class="field">formData json</text>
+    <text x="480" y="426" class="field">expectedReleaseDate string</text>
+    <text x="480" y="454" class="field">stage / status / responses / alerts</text>
+    <text x="480" y="482" class="field">createdAt / updatedAt</text>
+  </g>
+
+  <g class="shadow">
+    <rect x="931" y="188" width="405" height="315" rx="14" class="cardGreen"/>
+    <text x="955" y="226" class="head">HousingProvider</text>
+    <text x="955" y="258" class="field">id PK autoincrement</text>
+    <text x="955" y="286" class="field">name / district / housingType</text>
+    <text x="955" y="314" class="field">menAccepted / womenAccepted</text>
+    <text x="955" y="342" class="field">ridersAccepted</text>
+    <text x="955" y="370" class="field">sexOffendersAccepted</text>
+    <text x="955" y="398" class="field">violenceHistoryAccepted</text>
+    <text x="955" y="426" class="field">faithBasedProvider</text>
+    <text x="955" y="454" class="field">address / city / zip</text>
+    <text x="955" y="482" class="field">contactName / phone / email</text>
+  </g>
+
+  <g class="shadow">
+    <rect x="456" y="548" width="405" height="245" rx="14" class="cardAmber"/>
+    <text x="480" y="586" class="head">GcsPdfFile</text>
+    <text x="480" y="618" class="field">id PK uuid</text>
+    <text x="480" y="646" class="field">stateCode enum US_ID</text>
+    <text x="480" y="674" class="field">staffPseudonymizedId string</text>
+    <text x="480" y="702" class="field">bucketName + objectKey unique</text>
+    <text x="480" y="730" class="field">originalFileName / contentType</text>
+    <text x="480" y="758" class="field">uploadStatus enum</text>
+  </g>
+
+  <g class="shadow">
+    <rect x="931" y="548" width="405" height="245" rx="14" class="card"/>
+    <text x="955" y="586" class="head">External Services</text>
+    <text x="955" y="618" class="field">Auth0 token verification</text>
+    <text x="955" y="646" class="field">Google Cloud Storage PDF object</text>
+    <text x="955" y="674" class="field">DocumentAI / Vertex AI extraction</text>
+    <text x="955" y="714" class="muted">Not database tables</text>
+    <text x="955" y="744" class="muted">Used by upload and extraction flows</text>
+  </g>
+
+  <!-- Relationship lines -->
+  <path d="M386 282 C420 282 420 286 456 286" fill="none" stroke="#7c3aed" stroke-width="3" marker-end="url(#arrowBlue)"/>
+  <text x="396" y="248" class="tiny">staff id</text>
+  <path d="M386 352 C420 352 420 675 456 675" fill="none" stroke="#d97706" stroke-width="3" marker-end="url(#arrowAmber)"/>
+  <text x="118" y="424" class="tiny">conceptual links; no Prisma foreign keys</text>
+  <path d="M386 336 C480 520 820 520 931 482" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#arrowGreen)"/>
+  <text x="604" y="536" class="tiny">providerId/contactEmail resolves provider account</text>
+  <path d="M861 670 C895 670 895 646 931 646" fill="none" stroke="#d97706" stroke-width="3" marker-end="url(#arrowAmber)"/>
+  <path d="M861 420 C895 420 895 315 931 315" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#arrowGreen)"/>
+
+  <!-- Auth flow section -->
+  <text x="56" y="856" class="section">Auth + Procedure Flow</text>
+
+  <g class="shadow">
+    <rect x="56" y="884" width="178" height="82" rx="12" class="card"/>
+    <text x="145" y="920" text-anchor="middle" class="flowText">LoginPage</text>
+    <text x="145" y="946" text-anchor="middle" class="flowSub">enter email</text>
+  </g>
+  <path d="M234 925 H298" fill="none" stroke="#2563eb" stroke-width="4" marker-end="url(#arrowBlue)"/>
+
+  <g class="shadow">
+    <rect x="304" y="884" width="252" height="82" rx="12" class="cardBlue"/>
+    <text x="430" y="917" text-anchor="middle" class="flowText">checkSignInEmail</text>
+    <text x="430" y="944" text-anchor="middle" class="flowSub">publicProcedure + rate limit</text>
+  </g>
+  <path d="M556 925 H620" fill="none" stroke="#2563eb" stroke-width="4" marker-end="url(#arrowBlue)"/>
+
+  <g class="shadow">
+    <rect x="626" y="884" width="268" height="82" rx="12" class="cardPurple"/>
+    <text x="760" y="917" text-anchor="middle" class="flowText">Auth0 Login</text>
+    <text x="760" y="944" text-anchor="middle" class="flowSub">staff password or provider email code</text>
+  </g>
+  <path d="M894 925 H958" fill="none" stroke="#2563eb" stroke-width="4" marker-end="url(#arrowBlue)"/>
+
+  <g class="shadow">
+    <rect x="964" y="884" width="250" height="82" rx="12" class="card"/>
+    <text x="1089" y="917" text-anchor="middle" class="flowText">createContext</text>
+    <text x="1089" y="944" text-anchor="middle" class="flowSub">verify token + parse role</text>
+  </g>
+  <path d="M1214 925 H1278" fill="none" stroke="#2563eb" stroke-width="4" marker-end="url(#arrowBlue)"/>
+
+  <g class="shadow">
+    <rect x="1284" y="884" width="252" height="82" rx="12" class="cardAmber"/>
+    <text x="1410" y="917" text-anchor="middle" class="flowText">tRPC Procedures</text>
+    <text x="1410" y="944" text-anchor="middle" class="flowSub">base / staff / provider guards</text>
+  </g>
+
+  <!-- Role split -->
+  <g class="shadow">
+    <rect x="56" y="1006" width="710" height="142" rx="16" class="cardBlue"/>
+    <text x="82" y="1042" class="head">Staff User Flow</text>
+    <text x="82" y="1074" class="small">Email: .gov or @idoc.idaho.gov → role = staff → staffProcedure</text>
+    <text x="82" y="1102" class="field">housingApplication: getByStaff, extractContent, create, update, delete</text>
+    <text x="82" y="1130" class="field">gcs: uploadPdf, getPdf, listPdfObjects, deletePdf, registerUpload</text>
+  </g>
+
+  <g class="shadow">
+    <rect x="814" y="1006" width="710" height="142" rx="16" class="cardGreen"/>
+    <text x="840" y="1042" class="head">Provider User Flow</text>
+    <text x="840" y="1074" class="small">Provider email → provisioned via HousingProvider.contactEmail</text>
+    <text x="840" y="1102" class="field">context resolves providerId from metadata or provider contact email</text>
+    <text x="840" y="1130" class="note">providerProcedure exists, but no provider route is wired in this slice yet</text>
+  </g>
+
+  <!-- Staff app workflow mini sequence -->
+  <path d="M410 966 V996" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#arrowBlue)"/>
+  <path d="M1410 966 V996" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#arrowGreen)"/>
+  <text x="410" y="988" text-anchor="middle" class="tiny">staff</text>
+  <text x="1410" y="988" text-anchor="middle" class="tiny">provider</text>
+</svg>

@@ -1,0 +1,111 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1775467219326,
+      "tag": "0000_init_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775469572303,
+      "tag": "0001_client_invoice_entry_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776325946695,
+      "tag": "0002_add_lead_source_value",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776326462215,
+      "tag": "0003_enforce_lead_unique_identifiers",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776412800000,
+      "tag": "0004_user_teams_junction",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1776931200000,
+      "tag": "0005_add_lead_team_lead_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777017600000,
+      "tag": "0006_add_tasks_created_by_user_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1777104000000,
+      "tag": "0007_plan_teams",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1777185000000,
+      "tag": "0008_add_lead_contact_options",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1777190400000,
+      "tag": "0009_add_plan_call_delay",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1777277000000,
+      "tag": "0010_add_lead_created_by_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1777363200000,
+      "tag": "0011_add_plan_level_tasks",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1777449600000,
+      "tag": "0012_unique_active_plan_schedule_tasks",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1777500000000,
+      "tag": "0013_plan_task_schedule_controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1778070126078,
+      "tag": "0014_add_linkedin_profiles_and_email_accounts",
+      "breakpoints": true
+    }
+  ]
+}
