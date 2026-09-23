@@ -1,136 +1,212 @@
-Sales Pulse
-Sales Pulse is an internal full stack KPI tracking and lead management platform developed for in house sales and revenue operations teams. The application is designed to centralize lead management, sales activity tracking, and KPI reporting within a single internal system.
-This project is proprietary and intended strictly for internal use.
+# Sales Pulse
 
-Overview
-Sales Pulse provides internal teams with tools to manage leads, track outreach performance, and monitor sales KPIs in real time. The system supports bulk lead operations, spreadsheet based lead ingestion, and structured reporting for management visibility.
-The application is built as a monolithic system with a clear separation between frontend and backend responsibilities to ensure maintainability and scalability.
+**Sales Pulse** is an internal full-stack KPI tracking and lead management platform developed for in-house sales and revenue operations teams. The application centralizes lead management, sales activity tracking, and KPI reporting in a single internal system.
 
-Key Features
-	•	Internal lead management with configurable statuses
-	•	Bulk lead selection and bulk status updates
-	•	KPI dashboards for internal performance tracking
-	•	Spreadsheet upload and processing for lead ingestion
-	•	REST based API for internal system communication
-	•	Cloud ready architecture using PostgreSQL
+> **Note:** In the [React-Typescript-Web3](https://github.com/awaisahmadfg/React-Typescript-Web3) portfolio repo, this project lives under **`LeadSales/`**. The product name remains **Sales Pulse**.
 
-Tech Stack
-Frontend
-	•	React
-	•	Vite
-	•	TypeScript
-Backend
-	•	Node.js
-	•	Express.js
-	•	TypeScript
-Database
-	•	PostgreSQL
-ORM
-	•	Drizzle ORM
-Infrastructure
-	•	AWS compatible deployment
-	•	Environment based configuration
-	•	CI and CD enabled workflows
+This project is **proprietary** and intended strictly for **internal use**.
 
-Architecture Overview
-The system follows a logical three tier architecture.
-	•	Frontend presentation layer built using React and Vite
-	•	Backend application layer built using Node.js and Express
-	•	Data layer powered by PostgreSQL
-The application is deployed as a single internal service while maintaining clear logical boundaries between layers.
+---
 
-Project Structure
-SalesPulse/
-│
-├── client/                 # Frontend app (Vite root is this folder)
+## Overview
+
+Sales Pulse gives internal teams tools to manage leads, track outreach performance, and monitor sales KPIs in real time. The system supports bulk lead operations, spreadsheet-based lead ingestion, and structured reporting for management visibility.
+
+The application is a **monolith** with a clear separation between frontend and backend responsibilities for maintainability and scalability.
+
+---
+
+## Key features
+
+- Internal lead management with configurable statuses
+- Bulk lead selection and bulk status updates
+- KPI dashboards for internal performance tracking
+- Spreadsheet upload and processing for lead ingestion
+- REST-based API for internal system communication
+- Cloud-ready architecture using PostgreSQL
+
+---
+
+## Tech stack
+
+| Layer | Technologies |
+|--------|----------------|
+| **Frontend** | React, Vite, TypeScript |
+| **Backend** | Node.js, Express.js, TypeScript |
+| **Database** | PostgreSQL |
+| **ORM** | Drizzle ORM |
+| **Infrastructure** | AWS-compatible deployment, environment-based configuration, CI/CD workflows |
+
+---
+
+## Architecture overview
+
+The system follows a logical **three-tier** architecture:
+
+1. **Presentation** — React + Vite (`client/`)
+2. **Application** — Node.js + Express (`server/`)
+3. **Data** — PostgreSQL (via Drizzle)
+
+The app is deployed as a single internal service while keeping clear boundaries between layers.
+
+---
+
+## Project structure
+
+```text
+LeadSales/                    # Sales Pulse (portfolio folder name)
+├── client/                   # Frontend (Vite root)
 │   ├── src/
 │   └── index.html
-│
-├── server/                 # Backend application
-│   ├── routes.ts
-│   ├── storage.ts
-│   ├── db.ts
-│   └── index.ts
-│
-├── shared/                 # Shared schemas and types
+├── server/                   # Backend
+│   ├── main.ts               # Express entry
+│   ├── routes/               # REST routes
+│   ├── services/             # Domain services
+│   ├── database/             # db.ts, storage.ts
+│   └── config/               # env validation
+├── shared/                   # Shared schemas and types
 │   └── schema.ts
-│
-├── script/                 # Build and migration scripts
-├── migrations/             # Drizzle SQL migrations
+├── script/                   # Build, migrate, seed
+├── migrations/               # Drizzle SQL migrations
 ├── vite.config.ts
 ├── drizzle.config.ts
 ├── package.json
 ├── tsconfig.json
 └── README.md
+```
 
+---
 
-Database and ORM
-Sales Pulse uses PostgreSQL as the primary database with Drizzle ORM for type safe database interactions.
-Key details:
-	•	Standard PostgreSQL
-	•	Strong typing enforced through shared schemas
-	•	Centralized database configuration
-	•	Secure connection handling via environment variables
+## Database and ORM
 
-Environment Variables
-All configuration is managed using environment variables.
-Required variables:
+Sales Pulse uses **PostgreSQL** with **Drizzle ORM** for type-safe database access.
+
+- Standard PostgreSQL
+- Strong typing via shared schemas (`shared/schema.ts`)
+- Centralized database configuration
+- Connections and secrets via environment variables
+
+---
+
+## Environment variables
+
+Configuration is driven by environment variables. Create a local `.env` (never commit secrets).
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `PORT` | HTTP port (default `5000`) |
+| `NODE_ENV` | `development` or `production` |
+| `SESSION_SECRET` | Session signing secret (required in production) |
+
+Example (development only — use placeholders, not real credentials):
+
+```env
 DATABASE_URL=postgresql://user:password@host/dbname
 PORT=5000
 NODE_ENV=development
+SESSION_SECRET=change-me-in-production
+```
 
-Production environments must inject variables using approved internal infrastructure such as AWS environment configuration or a secrets manager.
+Production must inject values through approved internal infrastructure (e.g. AWS environment configuration or a secrets manager).
 
-Local Development Setup
-This section is intended for authorized internal developers only.
-Prerequisites
-	•	Node.js version 18 or higher
-	•	npm or yarn
-	•	Access to an approved PostgreSQL database
-Setup Steps
-	•	Ensure access permissions to the internal repository
-	•	Install dependencies using the approved package manager
-	•	Configure environment variables according to internal guidelines
+---
 
-Running the Application
-Backend
-npm run dev:server
+## Local development setup
 
-Frontend
+*For authorized internal developers only.*
+
+### Prerequisites
+
+- Node.js **18+**
+- npm or yarn
+- Access to an approved PostgreSQL database
+
+### Setup
+
+1. Clone the repository and open the `LeadSales/` directory.
+2. Install dependencies: `npm install`
+3. Configure environment variables per internal guidelines.
+
+### Running the application
+
+**Full stack (Express + Vite middleware):**
+
+```bash
+npm run dev
+```
+
+**Frontend only (Vite dev server, port 5000):**
+
+```bash
 npm run dev:client
+```
 
-Internal access URLs:
-	•	Frontend: http://localhost:5173
-	•	Backend API: http://localhost:5000
+**Typical local URLs**
 
-Deployment on AWS
-Sales Pulse is deployed using internal AWS infrastructure.
-Supported deployment models include:
-	•	AWS App Runner
-	•	EC2 with managed process control
-	•	ECS with Fargate
-Deployment standards:
-	•	Environment variables injected at runtime
-	•	Database hosted on PostgreSQL (for example AWS RDS)
-	•	Access restricted to internal networks
+| Service | URL |
+|---------|-----|
+| App (dev) | `http://localhost:5000` (default `PORT`) |
+| API | Same origin under Express routes |
 
-Security and Access Control
-	•	This system is for internal use only
-	•	Access is restricted to authorized personnel
-	•	Secrets are managed via environment configuration
-	•	API access controls and middleware can be enforced as required
-	•	Network access can be restricted using VPC and security groups
+Database helpers:
 
-Maintenance and Ownership
-This project is owned and maintained by the internal engineering and revenue operations teams.
-All changes must follow internal review, approval, and deployment processes.
+```bash
+npm run db:migrate
+npm run db:seed
+```
 
-License and Usage
-This software is proprietary and confidential.
-Unauthorized copying, redistribution, or external use is strictly prohibited.
+---
 
-PM2 Deployment Commands
-Use these commands after running `npm run build`:
+## Deployment on AWS
+
+Sales Pulse is designed for internal AWS infrastructure.
+
+**Supported models**
+
+- AWS App Runner
+- EC2 with managed process control
+- ECS with Fargate
+
+**Standards**
+
+- Environment variables injected at runtime
+- Database on PostgreSQL (e.g. AWS RDS)
+- Access restricted to internal networks
+
+---
+
+## Security and access control
+
+- Internal use only
+- Access limited to authorized personnel
+- Secrets via environment configuration (no secrets in git)
+- API middleware and session auth as required
+- Network isolation via VPC and security groups where applicable
+
+---
+
+## Maintenance and ownership
+
+Owned and maintained by internal engineering and revenue operations teams. Changes follow internal review, approval, and deployment processes.
+
+---
+
+## License and usage
+
+This software is **proprietary and confidential**. Unauthorized copying, redistribution, or external use is prohibited.
+
+---
+
+## PM2 deployment
+
+After a production build:
+
+```bash
+npm run build
+```
+
+Process management:
 
 ```bash
 pm2 start dist/index.cjs --name SalesPulse --env production
@@ -142,4 +218,3 @@ pm2 logs SalesPulse
 pm2 save
 pm2 startup
 ```
-
