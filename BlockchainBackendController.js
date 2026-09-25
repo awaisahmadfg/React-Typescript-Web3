@@ -88,6 +88,10 @@ const {
   fetchWalletTransactionsFromMoralis,
 } = require('../helpers/walletMoralis');
 const { estimateWalletSendGas } = require('../helpers/walletSendGas');
+const {
+  getPublicBlockchainConfig,
+} = require('../helpers/publicBlockchainConfig');
+const marketplaceChain = require('../helpers/marketplaceChain');
 
 // Load environment variables
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -740,6 +744,19 @@ const blockchainController = {
       return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
         success: false,
         message: error?.message || 'Failed to build RC reward preview',
+      });
+    }
+  },
+
+  getPublicConfig: async (req, res) => {
+    try {
+      const config = getPublicBlockchainConfig();
+      return res.json({ success: true, ...config });
+    } catch (error) {
+      console.error('[getPublicConfig]', error?.message || error);
+      return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+        success: false,
+        message: error?.message || 'Failed to load public blockchain config',
       });
     }
   },
@@ -2936,6 +2953,238 @@ blockchainController.sendRoyaltyCoin = async (req, res) => {
       success: false,
       message: `${ERRORS.SEND_ROYALTY_COIN_FAILED}: ${error.message}`,
     });
+  }
+};
+
+function sendMarketplaceChainError(res, error) {
+  return res.status(HTTP_STATUS.BAD_REQUEST).json({
+    success: false,
+    message: error?.message || 'Marketplace chain request failed',
+  });
+}
+
+blockchainController.marketplaceChainRoles = [
+  COMMON.ADMINS,
+  COMMON.STANDARD_USER,
+  COMMON.INFLUENCER,
+];
+
+blockchainController.getNftOwner = async (req, res) => {
+  try {
+    const ownerAddress = await marketplaceChain.getNftOwnerAddress(
+      req.params.tokenId,
+    );
+    return res.json({ success: true, ownerAddress });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getNftExpiry = async (req, res) => {
+  try {
+    const status = await marketplaceChain.getNftExpiryStatus(
+      req.params.tokenId,
+    );
+    return res.json({ success: true, ...status });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getFixedPrice = async (req, res) => {
+  try {
+    const fixedPrice = await marketplaceChain.getFixedPriceListing(
+      req.params.fixedId,
+    );
+    return res.json({ success: true, fixedPrice });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getAuction = async (req, res) => {
+  try {
+    const auction = await marketplaceChain.getAuctionListing(
+      req.params.auctionId,
+    );
+    return res.json({ success: true, auction });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getRoyaltyReceiver = async (req, res) => {
+  try {
+    const royaltyReceiver = await marketplaceChain.getRoyaltyReceiver(
+      req.params.tokenId,
+    );
+    return res.json({ success: true, royaltyReceiver });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getUsdtAllowance = async (req, res) => {
+  try {
+    const { walletAddress } = req.query;
+    const { spender } = req.query;
+    const allowance = await marketplaceChain.getUsdtAllowanceForAddress(
+      walletAddress,
+      spender,
+    );
+    return res.json({ success: true, allowance });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.getMarketplaceNftBalance = async (req, res) => {
+  try {
+    const count = await marketplaceChain.getMarketplaceNftBalance(
+      req.params.walletAddress,
+    );
+    return res.json({ success: true, count });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateBuyGas = async (req, res) => {
+  try {
+    const { walletAddress, fixedId } = req.body || {};
+    const result = await marketplaceChain.estimateBuyGas(
+      walletAddress,
+      fixedId,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateBidGas = async (req, res) => {
+  try {
+    const { walletAddress, auctionId, bidAmount } = req.body || {};
+    const result = await marketplaceChain.estimateBidGas(
+      walletAddress,
+      auctionId,
+      bidAmount,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateCancelFixedGas = async (req, res) => {
+  try {
+    const { fixedId } = req.body || {};
+    const result = await marketplaceChain.estimateCancelFixedGas(fixedId);
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateCancelAuctionGas = async (req, res) => {
+  try {
+    const { listingId } = req.body || {};
+    const result = await marketplaceChain.estimateCancelAuctionGas(listingId);
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateClaimGas = async (req, res) => {
+  try {
+    const { walletAddress, auctionId } = req.body || {};
+    const result = await marketplaceChain.estimateClaimGas(
+      walletAddress,
+      auctionId,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateAcceptGas = async (req, res) => {
+  try {
+    const { walletAddress, auctionId } = req.body || {};
+    const result = await marketplaceChain.estimateAcceptGas(
+      walletAddress,
+      auctionId,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateListFixedGas = async (req, res) => {
+  try {
+    const { walletAddress, tokenId, listPriceWei, paymentToken } =
+      req.body || {};
+    const result = await marketplaceChain.estimateListFixedGas(
+      walletAddress,
+      tokenId,
+      listPriceWei,
+      paymentToken,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateListAuctionGas = async (req, res) => {
+  try {
+    const {
+      walletAddress,
+      tokenId,
+      listPriceWei,
+      auctionStartTime,
+      auctionEndTime,
+      paymentToken,
+    } = req.body || {};
+    const result = await marketplaceChain.estimateListAuctionGas(
+      walletAddress,
+      tokenId,
+      listPriceWei,
+      auctionStartTime,
+      auctionEndTime,
+      paymentToken,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateNftApprovalGas = async (req, res) => {
+  try {
+    const { walletAddress, tokenId } = req.body || {};
+    const result = await marketplaceChain.estimateNftApprovalGas(
+      walletAddress,
+      tokenId,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
+  }
+};
+
+blockchainController.estimateMintGas = async (req, res) => {
+  try {
+    const { recipientAddress, tokenURI } = req.body || {};
+    const result = await marketplaceChain.estimateMintPatentTokenGas(
+      recipientAddress,
+      tokenURI,
+    );
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendMarketplaceChainError(res, error);
   }
 };
 
