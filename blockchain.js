@@ -169,18 +169,6 @@ async function getUsdtOnChainBalanceForAddress(walletAddress) {
   };
 }
 
-async function getEthOnChainBalanceForAddress(walletAddress) {
-  const address = ethers.utils.getAddress(String(walletAddress).trim());
-  const balanceRaw = await provider.getBalance(address);
-  const balance = parseFloat(ethers.utils.formatEther(balanceRaw));
-
-  return {
-    walletAddress: address,
-    balance: Number.isNaN(balance) ? 0 : balance,
-    balanceRaw: balanceRaw.toString(),
-  };
-}
-
 function isEthPaymentToken(paymentToken) {
   return !paymentToken || paymentToken === ZERO_ADDRESS;
 }
