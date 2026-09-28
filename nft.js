@@ -1,59 +1,91 @@
-/* eslint-disable no-console */
-const staticStageData = (invitation) => {
-  const inviterName = invitation.invitedBy.username;
-  const inventionName = invitation.dynamicTemplateData.inventionName;
+const mongoose = require('mongoose');
+const { MODALS } = require('../consts');
 
-  return {
-    2: {
-      title: 'Sell Rights, Earn Royalties',
-      subject: `${inviterName}: Sell the Rights, Earn the Royalties 💎`,
+const nftSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
     },
-    3: {
-      title: 'Commission Grows in Value',
-      subject: `${inviterName}: Why this commission grows in value 📈`,
+    image: {
+      type: String,
+      required: true,
     },
-    4: {
-      title: 'AI Sales Materials Ready',
-      subject: `${inviterName}: AI-generated sales materials included 🎥`,
+    owner: {
+      type: mongoose.Schema.ObjectId,
+      ref: MODALS.PROFILE,
     },
-    5: {
-      title: 'Target Buyer Audience',
-      subject: `${inviterName}: Who wants to buy ${inventionName}?`,
+    tags: [
+      {
+        type: mongoose.Schema.ObjectId,
+        ref: 'Tag',
+      },
+    ],
+    company: {
+      type: mongoose.Schema.ObjectId,
+      ref: 'Tag',
+      default: null,
     },
-    6: {
-      title: 'Join the IP Economy',
-      subject: `${inviterName}: Join the IP Economy 🌐`,
+    tokenId: {
+      type: String,
     },
-    7: {
-      title: 'Only One Buyer Takes Rights',
-      subject: `${inviterName}: Only one buyer takes the rights (and you get part of the sale!)`,
+    URI: {
+      type: String,
     },
-    8: {
-      title: 'Corporate Buyback Strategy',
-      subject: `${inviterName}: A Company might buy this automatically 🏢`,
+    isListed: {
+      type: Boolean,
+      default: false,
     },
-    9: {
-      title: 'Waiting for Offers',
-      subject: `${inviterName} is waiting for offers`,
+    onAuction: {
+      type: Boolean,
+      default: false,
     },
-    10: {
-      title: 'Last Chance to Broker',
-      subject: `${inviterName}: Last chance to broker ${inventionName} ⏳`,
+    maticPrice: {
+      type: Number,
     },
-  };
-};
+    promotionVideoUrl: {
+      type: String,
+    },
+    promotionVideoType: {
+      type: String,
+      default: 'video',
+    },
+    promotionVideoIsProcessing: {
+      type: Boolean,
+      default: false,
+    },
+    usdPrice: {
+      type: Number,
+    },
+    invention: {
+      type: mongoose.Schema.ObjectId,
+      ref: MODALS.APPLICATION,
+    },
+    expiryDate: {
+      type: Date,
+    },
+    isExpired: {
+      type: Boolean,
+      default: false,
+    },
+    auctionStartTime: {
+      type: Date,
+    },
+    paymentToken: {
+      type: String,
+      default: null,
+    },
+  },
+  { timestamps: true, versionKey: false },
+);
 
-const getNftInfluencerInviteData = async (invitation) => {
-  const stage = invitation?.currentStage + 1;
-  const stageData = staticStageData(invitation)[stage] || {};
+nftSchema.set('toJSON', {
+  virtuals: true,
+});
 
-  return {
-    ...invitation.dynamicTemplateData,
-    ...stageData,
-    stage,
-  };
-};
+const NFT = mongoose.model('Nft', nftSchema);
 
 module.exports = {
-  getNftInfluencerInviteData,
+  nftSchema,
+  NFT,
 };
