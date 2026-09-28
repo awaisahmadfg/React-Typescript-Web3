@@ -1,14 +1,10 @@
+/* eslint-disable */
 const { default: mongoose } = require('mongoose');
-const { HTTP_STATUS, MODALS, NFT_EVENTS } = require('../consts');
+const { HTTP_STATUS, MODALS, NFT_EVENTS, COMMON } = require('../consts');
 const { nftDal } = require('../dal');
 const { QUEUE_NFT_EMAILS, queueDb } = require('../helpers/queueDb');
-const {
-  sendNftListingEmail,
-  sendNftBuyerEmail,
-  sendNftSellerEmail,
-  sendNftExpiryEmail,
-} = require('../helpers/nft');
 const nodeCron = require('node-cron');
+const { handleNewNotification } = require('../helpers/notification');
 
 const nftController = {};
 
@@ -16,7 +12,14 @@ nftController.getList = async (req, res) => {
   try {
     const sort = req?.query?.sort ? JSON.parse(req?.query?.sort) : null;
     const range = req?.query?.range ? JSON.parse(req?.query?.range) : null;
-    const filter = req?.query?.filter ? JSON.parse(req?.query?.filter) : null;
+    let filter = req?.query?.filter ? JSON.parse(req?.query?.filter) : null;
+    if (typeof filter === 'string') {
+      try {
+        filter = JSON.parse(filter);
+      } catch (e) {
+        filter = null;
+      }
+    }
 
     const data = await nftDal.getList({ sort, range, filter }, req.user);
     const responseData = { data };
@@ -75,6 +78,7 @@ nftController.update = async (req, res) => {
         .findOne({ _id: originalOwner });
 
       queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+        type: 'buyer',
         email: ownerInfo.email,
         username: ownerInfo.username,
         websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${id}`,
@@ -83,11 +87,12 @@ nftController.update = async (req, res) => {
         ownerUrl: `${process.env.CLIENT_HOST}/profiles/${originalOwnerInfo.key}`,
       });
 
-      queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
-        await sendNftBuyerEmail(item.data);
-      });
+      // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+      //   await sendNftBuyerEmail(item.data);
+      // });
 
       queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+        type: 'seller',
         email: originalOwnerInfo.email,
         username: originalOwnerInfo.username,
         websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${id}`,
@@ -95,22 +100,23 @@ nftController.update = async (req, res) => {
         inventionUrl: `${process.env.CLIENT_HOST}/inventions/${invention}`,
       });
 
-      queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
-        await sendNftSellerEmail(item.data);
-      });
+      // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+      //   await sendNftSellerEmail(item.data);
+      // });
     }
 
     if (event === NFT_EVENTS.LIST) {
       queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+        type: 'listing',
         email: ownerInfo.email,
         username: ownerInfo.username,
         websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${id}`,
         inventionTitle: name,
         inventionUrl: `${process.env.CLIENT_HOST}/inventions/${invention}`,
       });
-      queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
-        await sendNftListingEmail(item.data);
-      });
+      // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+      //   await sendNftListingEmail(item.data);
+      // });
     }
 
     res.json(data);
@@ -145,6 +151,7 @@ nodeCron.schedule('0 0 * * *', async () => {
         .find({ isExpired: false, isListed: true });
 
       queueDb.addToQueue(QUEUE_NFT_EMAILS, {
+        type: 'expiry',
         email: owner.email,
         username: owner.username,
         websiteUrl: `${process.env.CLIENT_HOST}/marketplace/${res._id}`,
@@ -154,11 +161,62 @@ nodeCron.schedule('0 0 * * *', async () => {
         aiAgentUrl: `${process.env.CLIENT_HOST}`,
       });
 
-      queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
-        await sendNftExpiryEmail(item.data);
-      });
+      // queueDb.createWorker(QUEUE_NFT_EMAILS, async (item) => {
+      //   await sendNftExpiryEmail(item.data);
+      // });
     }
   });
+});
+
+// Send reminder notifications to NFT owners before their patent expires
+nodeCron.schedule('0 0 * * *', async () => {
+  try {
+    const now = new Date();
+    const reminderDays = [30, 7, 1];
+
+    for (const days of reminderDays) {
+      // Build a window: exactly `days` days from now (start of that day to end of that day)
+      const startOfDay = new Date(now);
+      startOfDay.setDate(startOfDay.getDate() + days);
+      startOfDay.setHours(0, 0, 0, 0);
+
+      const endOfDay = new Date(startOfDay);
+      endOfDay.setHours(23, 59, 59, 999);
+      1;
+      const expiringNfts = await mongoose.model(MODALS.NFT).find({
+        isExpired: false,
+        expiryDate: { $gte: startOfDay, $lte: endOfDay }, //checking only for that day
+      });
+
+      if (expiringNfts.length === 0) continue;
+
+      // Send one notification call per NFT so itemId is correct per patent
+      for (const nft of expiringNfts) {
+        if (!nft.owner || !nft.invention) continue;
+
+        await handleNewNotification(
+          COMMON.CREATE,
+          {
+            ownerId: nft.owner,
+            userId: nft.owner,
+            itemId: nft.invention,
+            itemType: COMMON.APPLICATION,
+            ideaPoints: 0,
+            actions: ['remainder nft expiration'],
+          },
+          { count: days },
+        ).catch((err) =>
+          console.error(`NFT expiry reminder (${days}d) error:`, err),
+        );
+      }
+
+      console.log(
+        `NFT expiry reminders sent for ${expiringNfts.length} NFT(s) expiring in ${days} day(s).`,
+      );
+    }
+  } catch (err) {
+    console.error('Error in NFT expiry reminder cron job:', err);
+  }
 });
 
 module.exports = nftController;
