@@ -14,16 +14,21 @@ import {
   StyledMainBox,
   StyledTypography,
   SuccessPill,
-  PendingPill,
   FailedPill
 } from 'components/MyWallet/styledComponents';
 import TableView from 'components/TableView';
 import { getHeaders } from 'components/TableView/getHeaders';
-import Config from 'config/config';
+import {
+  getBlockExplorerBaseUrl,
+  getExplorerAddressUrl,
+  getExplorerNftTokenUrl,
+  getExplorerTxUrl,
+  getPublicContract
+} from 'helpers/publicBlockchainConfig';
 import { PsRecord } from 'dataPrvider';
 import { ethers } from 'ethers';
 import { GetUser } from 'redux-state/selectors';
-import { ASSET_TYPES, Constants } from 'utilities/constants';
+import { ASSET_TYPES, Constants, NUMBERS } from 'utilities/constants';
 
 export type Transaction = PsRecord & {
   block_timestamp: string;
@@ -34,6 +39,8 @@ export type Transaction = PsRecord & {
   ideaPoints?: number;
   isFiled?: boolean;
   isLocked?: boolean;
+  nftId?: string;
+  nftTitle?: string;
   nftTransactionUrl?: string;
   parentProduct?: Product;
   parentProductTitle?: string;
@@ -48,11 +55,26 @@ export type Transaction = PsRecord & {
 };
 
 interface TransactionViewProps {
-  fetchTransactions: any;
+  fetchTransactions: () => void;
   loading: boolean;
   refresh: number;
   transactions: Transaction[];
   walletType: string;
+  viewingWalletAddress?: string;
+}
+
+const ADDR_PREVIEW_HEAD = NUMBERS.SEVEN;
+const ADDR_PREVIEW_TAIL = NUMBERS.FOUR;
+
+function formatTransferValueForWallet(walletType: string, raw: string): string {
+  if (walletType === ASSET_TYPES.USDT) {
+    try {
+      return ethers.utils.formatUnits(raw, NUMBERS.SIX);
+    } catch {
+      return raw;
+    }
+  }
+  return ethers.utils.formatEther(raw);
 }
 
 export const TransactionsView: React.FC<TransactionViewProps> = ({
@@ -60,9 +82,12 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
   loading,
   refresh,
   transactions,
-  walletType
+  walletType,
+  viewingWalletAddress
 }) => {
   const user = GetUser();
+  const walletForDirection =
+    viewingWalletAddress?.toLowerCase() || user?.walletAddress?.toLowerCase();
 
   useEffect(() => {
     fetchTransactions();
@@ -71,8 +96,8 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
   const formatString = (str) => {
     if (str) {
       const lower = str.toLowerCase();
-      const start = lower.slice(0, 7);
-      const end = lower.slice(-4);
+      const start = lower.slice(0, ADDR_PREVIEW_HEAD);
+      const end = lower.slice(-ADDR_PREVIEW_TAIL);
       return `${start}..${end}`;
     }
   };
@@ -80,14 +105,14 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
   const getCells = useMemo(() => {
     return (icon, item) => {
       const transactionHashKey =
-        walletType === ASSET_TYPES.MATIC
+        walletType === ASSET_TYPES.ETHEREUM
           ? Constants.MATIC_HASH
           : Constants.IDEACOIN_HASH;
       const transactionHash = item[transactionHashKey];
       const baseCells = {
         hash: (
           <StyledLink
-            href={`${Config.SEPOLIA_BASE_URL}/${Constants.TX}/${transactionHash}`}
+            href={getExplorerTxUrl(transactionHash)}
             target={Constants._BLANK}
             rel={Constants.NO_OPENER_NO_REFFERRER}
           >
@@ -97,14 +122,13 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
         from: (
           <FromBox>
             <StyledLink
-              href={`${Config.SEPOLIA_BASE_URL}/${Constants.ADDRESS}/${item.from_address}`}
+              href={getExplorerAddressUrl(item.from_address)}
               target={Constants._BLANK}
               rel={Constants.NO_OPENER_NO_REFFERRER}
             >
               {`${formatString(item.from_address)} `}
             </StyledLink>
-            {item.from_address.toLowerCase() ===
-            user?.walletAddress.toLowerCase() ? (
+            {item.from_address.toLowerCase() === walletForDirection ? (
               <StyledArrowOutward />
             ) : (
               <StyledArrowInwards />
@@ -113,7 +137,7 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
         ),
         to: (
           <StyledLink
-            href={`${Config.SEPOLIA_BASE_URL}/${Constants.ADDRESS}/${item.to_address}`}
+            href={getExplorerAddressUrl(item.to_address)}
             target={Constants._BLANK}
             rel={Constants.NO_OPENER_NO_REFFERRER}
           >
@@ -123,44 +147,71 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
       };
 
       if (walletType === ASSET_TYPES.NFT) {
-        baseCells['Nft Ids'] = (
-          <StyledTypography>{item.token_id}</StyledTypography>
-        );
-        baseCells['Timestamp'] = (
-          <StyledTypography>
-            {new Date(item.block_timestamp).toLocaleString()}
-          </StyledTypography>
-        );
-        baseCells['Status'] = (
-          <Box height="1.75rem">
-            {item?.block_number !== null && item?.block_number !== undefined ? (
-              <SuccessPill>Success</SuccessPill>
-            ) : (
-              <FailedPill>Failed</FailedPill>
-            )}
-          </Box>
-        );
-      } else {
-        baseCells['Value'] = (
-          <StyledTypography>
-            {ethers.utils.formatEther(item.value)}
-          </StyledTypography>
-        );
-        baseCells['Timestamp'] = (
-          <StyledTypography>
-            {new Date(item.block_timestamp).toLocaleString()}
-          </StyledTypography>
-        );
-        baseCells['Status'] = (
-          <Box height="1.75rem">
-            {item?.block_number !== null && item?.block_number !== undefined ? (
-              <SuccessPill>Success</SuccessPill>
-            ) : (
-              <FailedPill>Failed</FailedPill>
-            )}
-          </Box>
-        );
+        const nftHref = item?.nftId
+          ? `/marketplace/${item.nftId}`
+          : getExplorerNftTokenUrl(
+              getPublicContract('marketplace'),
+              item.token_id
+            );
+        const nftCells = {
+          title: (
+            <StyledLink
+              href={nftHref}
+              target={Constants._BLANK}
+              rel={Constants.NO_OPENER_NO_REFFERRER}
+              sx={{
+                maxWidth: '10rem',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                display: 'block'
+              }}
+              title={item.nftTitle}
+            >
+              {item?.nftTitle || '-'}
+            </StyledLink>
+          ),
+          ...baseCells,
+          'Patent Token Ids': (
+            <StyledTypography>{item.token_id}</StyledTypography>
+          ),
+          Timestamp: (
+            <StyledTypography>
+              {new Date(item.block_timestamp).toLocaleString()}
+            </StyledTypography>
+          ),
+          Status: (
+            <Box height="1.75rem">
+              {item?.block_number !== null &&
+              item?.block_number !== undefined ? (
+                <SuccessPill>Success</SuccessPill>
+              ) : (
+                <FailedPill>Failed</FailedPill>
+              )}
+            </Box>
+          )
+        };
+        return nftCells;
       }
+      baseCells['Value'] = (
+        <StyledTypography>
+          {formatTransferValueForWallet(walletType, item.value)}
+        </StyledTypography>
+      );
+      baseCells['Timestamp'] = (
+        <StyledTypography>
+          {new Date(item.block_timestamp).toLocaleString()}
+        </StyledTypography>
+      );
+      baseCells['Status'] = (
+        <Box height="1.75rem">
+          {item?.block_number !== null && item?.block_number !== undefined ? (
+            <SuccessPill>Success</SuccessPill>
+          ) : (
+            <FailedPill>Failed</FailedPill>
+          )}
+        </Box>
+      );
       return baseCells;
     };
   }, [user?.walletAddress, walletType]);
@@ -174,9 +225,8 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
   const headers: Array<string> = useMemo(() => {
     if (walletType === ASSET_TYPES.NFT) {
       return getHeaders(Constants.ACCOUNT_NFT_TRANSACTIONS, user, true);
-    } else {
-      return getHeaders(Constants.ACCOUNT_TRANSACTIONS, user, true);
     }
+    return getHeaders(Constants.ACCOUNT_TRANSACTIONS, user, true);
   }, [user, walletType]);
 
   const shouldShowTransactions = !loading && transactions.length > 0;
@@ -188,13 +238,27 @@ export const TransactionsView: React.FC<TransactionViewProps> = ({
           <CircularProgress />
         </CenterBox>
       ) : shouldShowTransactions ? (
-        <TableView
-          headers={headers}
-          rows={rows}
-          showPaginations={false}
-          hasWalletFixedCellWidth={true}
-          cellWidths={['16.66%', '16.66%', '16.66%', '16.66%', '16.66%']}
-        />
+        <Box sx={{ overflowX: 'auto', width: '100%' }}>
+          <TableView
+            headers={headers}
+            rows={rows}
+            showPaginations={false}
+            hasWalletFixedCellWidth={true}
+            cellWidths={
+              walletType === ASSET_TYPES.NFT
+                ? [
+                    '14.28%',
+                    '14.28%',
+                    '14.28%',
+                    '14.28%',
+                    '14.28%',
+                    '14.28%',
+                    '14.28%'
+                  ]
+                : ['16.66%', '16.66%', '16.66%', '16.66%', '16.66%', '16.66%']
+            }
+          />
+        </Box>
       ) : (
         <CenterBox>
           <Body sx={{ marginTop: '1rem' }}>{Constants.NO_TRANSACTION_YET}</Body>
