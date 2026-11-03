@@ -442,39 +442,15 @@ async function finalizeAuctionSettlement({
     }
   }
 
-  queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-    type: 'idea_reward',
-    walletAddress: rewardWalletAddress,
+  await royaltyCoinRewardService.grantRCReward({
+    ...(isCompanyPurchase
+      ? { tagId: companyWalletTag._id }
+      : { profileId: ownerProfileId, walletAddress: rewardWalletAddress }),
     amount: 2,
-    rewardedEntity: isCompanyPurchase
-      ? companyWalletTag._id
-      : getPk(ownerProfileId),
-    rewardedEntityType: isCompanyPurchase ? MODALS.TAG : MODALS.PROFILE,
     sourceEntity: nft._id,
     sourceEntityType: MODALS.NFT,
     action: ROYALTY_COIN_ACTIONS.NFT_TRANSFER,
   });
-
-  if (isCompanyPurchase) {
-    await royaltyCoinRewardService.trackDistributedReward({
-      rewardedEntity: companyWalletTag._id,
-      amount: 2,
-      sourceEntity: nft._id,
-      sourceEntityType: MODALS.NFT,
-      rewardedEntityType: MODALS.TAG,
-      action: ROYALTY_COIN_ACTIONS.NFT_TRANSFER,
-    });
-  } else {
-    await royaltyCoinRewardService.trackDistributedReward({
-      rewardedEntity: getPk(ownerProfileId),
-      amount: 2,
-      sourceEntity: nft._id,
-      sourceEntityType: MODALS.NFT,
-      rewardedEntityType: MODALS.PROFILE,
-      action: ROYALTY_COIN_ACTIONS.NFT_TRANSFER,
-      notify: false,
-    });
-  }
 
   // Solution-sale RC: the worker records the rewards (pending for companies
   // and MindMiner, paid on the spot for individual creators). Never blocks the
@@ -551,6 +527,15 @@ async function getLatestRewardIteration() {
     console.error(ERRORS.GET_REWARD_ITERATION, error);
   }
 }
+
+/** Next trigger: 25% growth, but never at or below current treasury (avoids back-to-back iterations). */
+function computeNextUsdtThreshold(currentThreshold, ownerUsdt) {
+  const grown = (currentThreshold * 125) / 100;
+  const minAboveBalance = ownerUsdt + 1e-6;
+  return Math.max(grown, minAboveBalance);
+}
+
+let monitorUsdtBalanceInFlight = false;
 
 const formatBalance = (balance) => {
   return parseFloat(ethers.utils.formatUnits(balance, 18));
@@ -1148,11 +1133,16 @@ const blockchainController = {
   },
 
   monitorUsdtBalance: async () => {
+    if (monitorUsdtBalanceInFlight) {
+      return;
+    }
+    monitorUsdtBalanceInFlight = true;
     try {
       const ownerUsdtBalance = await usdtContract.balanceOf(wallet.address);
       const ownerUsdt = parseFloat(
         ethers.utils.formatUnits(ownerUsdtBalance, 6),
       );
+      console.info('[monitorUsdtBalance] ownerUsdt', ownerUsdt);
       const latestIteration = await getLatestRewardIteration();
       const threshold = latestIteration?.threshold;
       const thresholdMet =
@@ -1201,13 +1191,15 @@ const blockchainController = {
           }),
         );
 
-        const usdtThreshold = (threshold * 125) / 100;
+        const usdtThreshold = computeNextUsdtThreshold(threshold, ownerUsdt);
         await insertRewardIteration(usdtThreshold);
         await enqueuePendingUsdtRoyaltyPayouts();
         return;
       }
     } catch (error) {
       console.error(ERRORS.ETH_BALANCE_MONITORING_ERROR, error);
+    } finally {
+      monitorUsdtBalanceInFlight = false;
     }
   },
 
@@ -1424,50 +1416,15 @@ const blockchainController = {
           })
           .collation({ locale: 'en', strength: 2 })
           .lean();
-        if (isCompanyWallet) {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            status: 'pending',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: isCompanyWallet._id,
-            rewardedEntityType: MODALS.TAG,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: isCompanyWallet._id,
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.TAG,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-            status: 'pending',
-          });
-        } else {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: getPk(req.user.id),
-            rewardedEntityType: MODALS.PROFILE,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: getPk(req.user.id),
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.PROFILE,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-            notify: false,
-          });
-        }
+        await royaltyCoinRewardService.grantRCReward({
+          ...(isCompanyWallet
+            ? { tagId: isCompanyWallet._id }
+            : { profileId: req.user.id, walletAddress }),
+          amount: 2,
+          sourceEntity: nft._id,
+          sourceEntityType: MODALS.NFT,
+          action: ROYALTY_COIN_ACTIONS.NFT_LIST,
+        });
       } catch (listingRewardError) {
         console.error(
           '[listFixedNftTransaction] Listing 2RC reward failed:',
@@ -1747,51 +1704,15 @@ const blockchainController = {
       });
 
       try {
-        if (isCompanyPurchase) {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: isCompanyWallet._id,
-            rewardedEntityType: MODALS.TAG,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: isCompanyWallet._id,
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.TAG,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-            status: 'pending',
-          });
-        } else {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: getPk(req.user.id),
-            rewardedEntityType: MODALS.PROFILE,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: getPk(req.user.id),
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.PROFILE,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-            notify: false,
-          });
-        }
-
-        const reward = 2 * 0.1;
+        await royaltyCoinRewardService.grantRCReward({
+          ...(isCompanyPurchase
+            ? { tagId: isCompanyWallet._id }
+            : { profileId: req.user.id, walletAddress }),
+          amount: 2,
+          sourceEntity: nft._id,
+          sourceEntityType: MODALS.NFT,
+          action: ROYALTY_COIN_ACTIONS.NFT_SALE,
+        });
 
         // Always attempt campaign reward distribution to referring influencer
         const campaigns =
@@ -1801,37 +1722,13 @@ const blockchainController = {
             TYPES.NFT,
             COMMON.PURCHASED_NFT,
           )) || [];
-        const rewardedInfluencers = new Set();
-
-        for (const campaign of campaigns) {
-          const influencerId = campaign?.influencerId;
-          if (!influencerId || rewardedInfluencers.has(String(influencerId))) {
-            continue;
-          }
-          rewardedInfluencers.add(String(influencerId));
-
-          if (campaign.walletAddress) {
-            queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-              type: 'idea_reward',
-              walletAddress: campaign.walletAddress,
-              amount: reward,
-              rewardedEntity: influencerId,
-              rewardedEntityType: MODALS.PROFILE,
-              sourceEntity: getPk(nft),
-              sourceEntityType: MODALS.NFT,
-              action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-            });
-          }
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: influencerId,
-            amount: reward,
-            sourceEntity: getPk(nft),
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.PROFILE,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-          });
-        }
+        await royaltyCoinRewardService.grantInfluencerReferralRC({
+          campaigns,
+          amount: 2 * 0.1,
+          action: ROYALTY_COIN_ACTIONS.NFT_SALE,
+          sourceEntity: getPk(nft),
+          sourceEntityType: MODALS.NFT,
+        });
       } catch (rewardError) {
         console.error(
           '[buyFixedTransaction] Buy succeeded but reward distribution failed:',
@@ -2082,50 +1979,15 @@ const blockchainController = {
           .collation({ locale: 'en', strength: 2 })
           .lean();
 
-        if (isCompanyWallet) {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            status: 'pending',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: isCompanyWallet._id,
-            rewardedEntityType: MODALS.TAG,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: isCompanyWallet._id,
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.TAG,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-            status: 'pending',
-          });
-        } else {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            walletAddress,
-            amount: 2,
-            rewardedEntity: getPk(req.user.id),
-            rewardedEntityType: MODALS.PROFILE,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-          });
-
-          await royaltyCoinRewardService.trackDistributedReward({
-            rewardedEntity: getPk(req.user.id),
-            amount: 2,
-            sourceEntity: nft._id,
-            sourceEntityType: MODALS.NFT,
-            rewardedEntityType: MODALS.PROFILE,
-            action: ROYALTY_COIN_ACTIONS.NFT_LIST,
-            notify: false,
-          });
-        }
+        await royaltyCoinRewardService.grantRCReward({
+          ...(isCompanyWallet
+            ? { tagId: isCompanyWallet._id }
+            : { profileId: req.user.id, walletAddress }),
+          amount: 2,
+          sourceEntity: nft._id,
+          sourceEntityType: MODALS.NFT,
+          action: ROYALTY_COIN_ACTIONS.NFT_LIST,
+        });
       } catch (listingRewardError) {
         console.error(
           '[listAuctionNftTransaction] Listing 2RC reward failed:',
@@ -2339,37 +2201,14 @@ const blockchainController = {
           TYPES.NFT,
           COMMON.PURCHASED_NFT,
         )) || [];
-      const rewardedInfluencers = new Set();
-
-      for (const campaign of campaigns) {
-        const influencerId = campaign?.influencerId;
-        if (!influencerId || rewardedInfluencers.has(String(influencerId))) {
-          continue;
-        }
-        rewardedInfluencers.add(String(influencerId));
-
-        if (campaign.walletAddress) {
-          queueDb.addToQueue(QUEUE_REWARD_DISTRIBUTE, {
-            type: 'idea_reward',
-            walletAddress: campaign.walletAddress,
-            amount: reward,
-            rewardedEntity: influencerId,
-            rewardedEntityType: MODALS.PROFILE,
-            sourceEntity: getPk(itemId),
-            sourceEntityType: MODALS.NFT,
-            action: ROYALTY_COIN_ACTIONS.NFT_SALE,
-          });
-        }
-
-        await royaltyCoinRewardService.trackDistributedReward({
-          rewardedEntity: influencerId,
+      const rewardedInfluencers =
+        await royaltyCoinRewardService.grantInfluencerReferralRC({
+          campaigns,
           amount: reward,
+          action: ROYALTY_COIN_ACTIONS.NFT_SALE,
           sourceEntity: getPk(itemId),
           sourceEntityType: MODALS.NFT,
-          rewardedEntityType: MODALS.PROFILE,
-          action: ROYALTY_COIN_ACTIONS.NFT_SALE,
         });
-      }
 
       return {
         success: true,
@@ -2377,7 +2216,7 @@ const blockchainController = {
           userId,
           baseAmount,
           reward,
-          rewardedInfluencers: [...rewardedInfluencers],
+          rewardedInfluencers,
         },
       };
     } catch (error) {
@@ -3257,12 +3096,10 @@ async function enqueuePendingUsdtRoyaltyPayouts() {
 module.exports = blockchainController;
 
 nodeCron.schedule('*/5 * * * *', () => {
-  console.log('Running monitorUsdtBalance every 5 minutes');
   blockchainController.monitorUsdtBalance();
 });
 
-nodeCron.schedule('0 0 * * *', async () => {
-  console.log('Running daily USDT reward distribution job...');
+anodeCron.schedule('0 0 * * *', async () => {
   try {
     await enqueuePendingUsdtRoyaltyPayouts();
   } catch (err) {
