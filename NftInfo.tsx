@@ -19,19 +19,40 @@ import {
   UsdText
 } from './styledComponents';
 import { NftCardTimerRow } from './nftExpirationUtils';
+import { CardMeta } from './CardMeta';
+
+// Marketplace card sizes: title > price > meta (one step per level).
+const CARD_TITLE_SX = {
+  display: '-webkit-box',
+  fontSize: '1.125rem',
+  fontWeight: 600,
+  lineHeight: 1.3,
+  whiteSpace: 'normal',
+  WebkitBoxOrient: 'vertical',
+  WebkitLineClamp: 2,
+  wordBreak: 'break-word'
+};
+const CARD_PRICE_SX = { fontSize: '1.375rem', lineHeight: 1.2 };
+const CARD_SYMBOL_SX = {
+  color: 'rgba(255, 255, 255, 0.64)',
+  fontSize: '0.8125rem',
+  fontWeight: 500
+};
 
 const renderListingPrice = ({
   isListed,
   isEthListing,
   usdPrice,
   maticPrice,
-  paymentSymbol
+  paymentSymbol,
+  large = false
 }: {
   isListed: boolean;
   isEthListing: boolean;
   usdPrice?: number | string;
   maticPrice?: number | string;
   paymentSymbol: string;
+  large?: boolean;
 }) => {
   const amount = Number(isEthListing ? maticPrice : (maticPrice ?? usdPrice));
   const formattedAmount =
@@ -45,9 +66,11 @@ const renderListingPrice = ({
       placement={VARIANT.TOP}
       disableInteractive
     >
-      <UsdText>
+      <UsdText sx={large ? CARD_PRICE_SX : undefined}>
         {formattedAmount}
-        <StyledSubTypography>&nbsp;{paymentSymbol}</StyledSubTypography>
+        <StyledSubTypography sx={large ? CARD_SYMBOL_SX : undefined}>
+          &nbsp;{paymentSymbol}
+        </StyledSubTypography>
       </UsdText>
     </Tooltip>
   );
@@ -86,7 +109,8 @@ const ListedPriceBlock = ({
   isEthListing,
   usdPrice,
   maticPrice,
-  paymentSymbol
+  paymentSymbol,
+  large = false
 }: {
   isListed: boolean;
   onAuction: boolean;
@@ -94,6 +118,7 @@ const ListedPriceBlock = ({
   usdPrice?: number | string;
   maticPrice?: number | string;
   paymentSymbol: string;
+  large?: boolean;
 }) => {
   if (!isListed && !onAuction) {
     return null;
@@ -105,23 +130,65 @@ const ListedPriceBlock = ({
         isEthListing,
         usdPrice,
         maticPrice,
-        paymentSymbol
+        paymentSymbol,
+        large
       })}
     </PriceContainer>
   );
 };
 
+const CONTEST_TITLE_SX = {
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'normal',
+  display: '-webkit-box',
+  WebkitLineClamp: 5,
+  WebkitBoxOrient: 'vertical',
+  wordBreak: 'break-word'
+};
+
+const getTitleSx = (isCard: boolean, isContest: boolean) => {
+  if (isCard) return CARD_TITLE_SX;
+  return isContest ? CONTEST_TITLE_SX : {};
+};
+
+const NftTimers = ({
+  rows,
+  compact
+}: {
+  rows: NftCardTimerRow[];
+  compact: boolean;
+}) =>
+  compact ? (
+    <CardMeta rows={rows} />
+  ) : (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+      {rows.map((row) => (
+        <LabeledCountdown
+          key={`${row.label}-${row.expiryMs}`}
+          label={row.label}
+          expiryMs={row.expiryMs}
+        />
+      ))}
+    </Box>
+  );
+
 export const NftInfo = ({
   token,
   expiryTimestamp = null,
   cardTimers = null,
-  isContest = false
+  isContest = false,
+  variant = 'default'
 }: {
   token: Token;
   expiryTimestamp?: Date | string | null;
   cardTimers?: NftCardTimerRow[] | null;
   isContest?: boolean;
+  /** 'card': marketplace card hierarchy with compact timing lines. */
+  variant?: 'default' | 'card';
 }) => {
+  const isCard = variant === 'card';
   const { name, maticPrice, usdPrice, isListed, onAuction, paymentToken } =
     token;
   const paymentSymbol = getListingPaymentSymbol(paymentToken);
@@ -139,23 +206,15 @@ export const NftInfo = ({
       ? `${name.substring(0, NUMBERS.THREE_HUNDRED)}...`
       : name;
 
-  const contestNameSx = isContest
-    ? {
-        maxWidth: '100%',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'normal',
-        display: '-webkit-box',
-        WebkitLineClamp: 5,
-        WebkitBoxOrient: 'vertical',
-        wordBreak: 'break-word'
-      }
-    : {};
-
   return (
     <ParentBox>
       <NameBox>
-        <CardNameText sx={contestNameSx}>{displayName}</CardNameText>
+        <CardNameText
+          sx={getTitleSx(isCard, isContest)}
+          title={isCard ? displayName : undefined}
+        >
+          {displayName}
+        </CardNameText>
       </NameBox>
       <ListedPriceBlock
         isListed={isListed}
@@ -164,18 +223,9 @@ export const NftInfo = ({
         usdPrice={usdPrice}
         maticPrice={maticPrice}
         paymentSymbol={paymentSymbol}
+        large={isCard}
       />
-      {!isContest && (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          {timerRows.map((row) => (
-            <LabeledCountdown
-              key={`${row.label}-${row.expiryMs}`}
-              label={row.label}
-              expiryMs={row.expiryMs}
-            />
-          ))}
-        </Box>
-      )}
+      {!isContest && <NftTimers rows={timerRows} compact={isCard} />}
     </ParentBox>
   );
 };
